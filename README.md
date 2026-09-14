@@ -1,5 +1,22 @@
 # QQ ↔ DeepSeek Harness 桥接
 
+> ## ⚠️ 这是 **DSH 0.1.2 适配版（Fork）**
+>
+> 本仓库 fork 自 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge)，在其基础上做了
+> **DSH 0.1.2 协议移植**与若干增强。原版基于 `@deepseek-ai/dsh-host-apiproxy`
+> （DSH ≤ 0.1.1 的 HTTP API），**该包已在 DSH 0.1.2-alpha.1 被官方删除** ——
+> 也就是说 **原版在 DSH 0.1.2 上完全连不上，本 fork 才可用**。
+>
+> | 想看什么 | 去哪 |
+> |---|---|
+> | **给 AI 代理读的项目说明**（文件地图 / 不变量 / 已知坑 / 改动约束） | **[`AGENTS.md`](AGENTS.md)** ← 最省时间 |
+> | 移植全过程（协议差异、缺陷复盘、实测证据） | [`PORTING-DSH-0.1.2.md`](PORTING-DSH-0.1.2.md) |
+> | DSH 端安装 | [`docs/DSH_SETUP.md`](docs/DSH_SETUP.md) |
+> | 自启守护 / 故障速查 | [`tools/README.md`](tools/README.md) |
+>
+> **注意**：原版 README 里写的 `DSH Web API (127.0.0.1:3080/api)` 等描述针对 0.1.1；
+> 0.1.2 的地址/端口/令牌每次都变，客户端会从 harness 日志**自动发现**，详见 `AGENTS.md`。
+
 **English**: [README.en.md](README.en.md) | **中文**: [README.md](README.md)
 
 > 📘 详细内外核说明书见 **[docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md)**（架构、数据流、配置全解、调试与改进指南）。

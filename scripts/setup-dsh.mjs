@@ -1,29 +1,53 @@
 #!/usr/bin/env node
-// setup-dsh.mjs — 在目标设备上安装 qq-bridge 的 DSH 端配置
+// setup-dsh.mjs — 在目标设备上安装 qq-bridge 的 DSH 端配置（DSH 0.1.2 适配版）
 //
 // 功能：
 //   1. 安装两套 agent preset：qq-chat、qq-chat-v2
 //   2. 在 DSH profile 的 cordis.patch.yml 中挂载三个 MCP server：
 //      mcp-snowluma / mcp-snowluma-host / mcp-web-search-safe
-//   3. 在 profile package.json 中注册 qq-mode-console 插件
+//   3. 同一个 patch 层挂载 qq-mode-console 插件（DSH 设置页的 qq-mode 卡片）
+//   4. 兜底创建 state/mode.json
 //
 // 用法：
-//   node scripts/setup-dsh.mjs [profile]
+//   node scripts/setup-dsh.mjs [profile] [--dry-run]
 //
 // 默认 profile 为 web；可用环境变量 DSH_HOME 指定 DSH 根目录。
+//
+// ── 与旧版（0.1.1）脚本的差异 ────────────────────────────────────────────────
+// DSH 0.1.2 起：
+//   * `@deepseek-ai/dsh-host-apiproxy` 被删除，profile 的 bundle 由 DSH Desktop
+//     的 market 生成器接管（package.json 里有 dsh.desktop.generationProjection
+//     与 pnpm.overrides 的 link: 路径）。
+//   * 旧脚本会往 profile 的 package.json 里写 `"qq-mode-console": "link:<abs>"`
+//     并把它加进 dsh.profile.bundles，然后依赖 `dsh plugin --profile web install`
+//     去真正安装。这会和 Desktop 的生成器管理打架；一旦 bundles 里登记了
+//     解析不到的 bundle，DSH 会直接起不来（cannot resolve profile bundle）。
+//   * 而 `dsh` CLI 在 DSH Desktop 环境下通常不在 PATH，那一步会被跳过，
+//     于是「登记了但没装」——正好落进上面那个失败模式。
+//
+// 新版改为：把 qq-mode-console 用 `file://` specifier 直接挂在用户 patch 层。
+//   Cordis loader 的 import(name) 对非 `.` 开头的 specifier 直接走动态 import，
+//   而 file:// URL 是合法 ESM specifier，因此无需装配/bundle 注册/pnpm install，
+//   也完全不碰 profile 的 package.json。插件通过仓库自带的 node_modules 解析
+//   `@deepseek-ai/schemastery`。移除时删掉 patch 里的对应条目即可，无残留。
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
 const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
-const PROFILE = process.argv[2] || 'web';
+
+const args = process.argv.slice(2);
+const DRY_RUN = args.includes('--dry-run');
+const PROFILE = args.find((a) => !a.startsWith('--')) || 'web';
+
+const BEGIN_MARKER = '# === qq-bridge MCP BEGIN ===';
+const END_MARKER = '# === qq-bridge MCP END ===';
 
 function log(msg) {
-  console.log(`[setup-dsh] ${msg}`);
+  console.log(`[setup-dsh]${DRY_RUN ? ' (dry-run)' : ''} ${msg}`);
 }
 
 function fatal(msg) {
@@ -39,6 +63,10 @@ function copyPreset(name) {
   const src = path.join(REPO_ROOT, 'dsh', 'agent-presets', name);
   const dest = path.join(DSH_HOME, '.agent-presets', name);
   if (!fs.existsSync(src)) fatal(`preset source not found: ${src}`);
+  if (DRY_RUN) {
+    log(`would install preset: ${name} -> ${dest}`);
+    return;
+  }
   ensureDir(path.dirname(dest));
   fs.cpSync(src, dest, { recursive: true, force: true });
   log(`preset installed: ${name}`);
@@ -48,15 +76,23 @@ function yamlSingleQuote(s) {
   return `'${String(s).replace(/'/g, "''")}'`;
 }
 
-function mcpBlock() {
+/** profile patch 层里引用本地插件：file:// URL（跨盘也能用，不受相对路径限制）。 */
+function pluginSpecifier() {
+  const entry = path.join(REPO_ROOT, 'plugins', 'qq-mode-console', 'lib', 'index.js');
+  if (!fs.existsSync(entry)) fatal(`console plugin entry not found: ${entry}`);
+  return pathToFileURL(entry).href;
+}
+
+function patchBlock() {
   const node = process.execPath;
   const servers = {
     'mcp-snowluma': path.join(REPO_ROOT, 'src', 'mcp-snowluma-safe.js'),
     'mcp-snowluma-host': path.join(REPO_ROOT, 'src', 'mcp-host-server.js'),
     'mcp-web-search-safe': path.join(REPO_ROOT, 'src', 'mcp-web-search-safe.js'),
   };
-  let out = '# === qq-bridge MCP BEGIN ===\n';
+  let out = `${BEGIN_MARKER}\n`;
   for (const [id, script] of Object.entries(servers)) {
+    if (!fs.existsSync(script)) fatal(`MCP server script not found: ${script}`);
     out += `- insert:\n`;
     out += `    - id: ${id}\n`;
     out += `      name: '@deepseek-ai/dsh-mcp-client'\n`;
@@ -70,33 +106,39 @@ function mcpBlock() {
       out += `        toolCallTimeoutMs: 725000\n`;
     }
   }
-  out += '# === qq-bridge MCP END ===\n';
+  // 控制台插件：只注册 qq-mode settings 命名空间（设置页卡片）。
+  // 可选；不装也能用 —— 桥接自己的控制台（默认 127.0.0.1:3100）同样能切模式。
+  out += `- insert:\n`;
+  out += `    - id: qq-mode-console\n`;
+  out += `      name: ${yamlSingleQuote(pluginSpecifier())}\n`;
+  out += `      config: {}\n`;
+  out += `${END_MARKER}\n`;
   return out;
 }
 
 function patchCordis() {
   const profileDir = path.join(DSH_HOME, 'profiles', PROFILE);
   const patchFile = path.join(profileDir, 'cordis.patch.yml');
-  ensureDir(profileDir);
+  const block = patchBlock();
+
   let text = '';
-  if (fs.existsSync(patchFile)) {
-    text = fs.readFileSync(patchFile, 'utf8');
-  }
-  const beginMarker = '# === qq-bridge MCP BEGIN ===';
-  const endMarker = '# === qq-bridge MCP END ===';
-  const block = mcpBlock();
-  if (text.includes(beginMarker) && text.includes(endMarker)) {
+  if (fs.existsSync(patchFile)) text = fs.readFileSync(patchFile, 'utf8');
+
+  const hasBlock = text.includes(BEGIN_MARKER) && text.includes(END_MARKER);
+  const hasLegacy = text.includes('mcp-snowluma-safe.js') || text.includes('id: mcp-snowluma');
+
+  if (hasBlock) {
     text = text.replace(
-      /[^\n]*# === qq-bridge MCP BEGIN ===[\s\S]*?# === qq-bridge MCP END ===[^\n]*/,
-      block.trimEnd(),
+      /[^\n]*# === qq-bridge MCP BEGIN ===[\s\S]*?# === qq-bridge MCP END ===[^\n]*\n?/,
+      block,
     );
-    log(`cordis.patch.yml: qq-bridge MCP block updated`);
-  } else if (text.includes('id: mcp-snowluma') || text.includes('mcp-snowluma-safe.js')) {
-    log(`cordis.patch.yml already contains mcp-snowluma entries; skipped auto-insert. Please check manually if they point to this repo.`);
+    log('cordis.patch.yml: qq-bridge 区块已更新');
+  } else if (hasLegacy) {
+    log('cordis.patch.yml 里已有 mcp-snowluma 相关条目但没有标记块；请手动核对路径是否指向本仓库，脚本未改动。');
     return;
   } else {
-    // 剥离 DSH 模板自带、独立成行的空数组 `[]`，否则追加的 block 列表会与它组成
-    // 两个 YAML 根节点，DSH 启动时报 “end of the stream or a document separator is expected”。
+    // DSH 模板自带、独立成行的空数组 `[]` 必须剥离，否则追加的列表会与它组成
+    // 两个 YAML 根节点，DSH 重启报 “end of the stream or a document separator is expected”。
     text = text.replace(/^[ \t]*\[\][ \t]*(?:\r?\n|$)/gm, '');
     if (text.trim().length > 0) {
       if (!text.endsWith('\n')) text += '\n';
@@ -104,126 +146,56 @@ function patchCordis() {
     } else {
       text += block;
     }
-    log(`cordis.patch.yml: qq-bridge MCP block appended`);
+    log('cordis.patch.yml: qq-bridge 区块已追加');
+  }
+
+  if (DRY_RUN) {
+    log(`would write ${patchFile}:`);
+    console.log('-----8<-----');
+    console.log(text);
+    console.log('----->8-----');
+    return;
+  }
+
+  ensureDir(profileDir);
+  if (fs.existsSync(patchFile)) {
+    const backup = `${patchFile}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    fs.copyFileSync(patchFile, backup);
+    log(`已备份原文件: ${path.basename(backup)}`);
   }
   fs.writeFileSync(patchFile, text, 'utf8');
-}
-
-function ensurePluginLink() {
-  const repoPlugin = path.join(REPO_ROOT, 'plugins', 'qq-mode-console');
-  const pluginLink = path.join(DSH_HOME, 'plugins', 'qq-mode-console');
-  if (!fs.existsSync(repoPlugin)) fatal(`plugin not found: ${repoPlugin}`);
-  ensureDir(path.dirname(pluginLink));
-
-  let existing = null;
-  try {
-    existing = fs.lstatSync(pluginLink);
-  } catch (error) {
-    if (error?.code !== 'ENOENT') fatal(`failed to inspect plugin link: ${error?.message ?? error}`);
-  }
-
-  if (existing) {
-    if (!existing.isSymbolicLink()) {
-      fatal(`plugin path already exists and is not a symlink/junction: ${pluginLink}. Please remove it manually or move it out of the way, then rerun.`);
-    }
-    // 符号链接/junction 存在时，校验是否指向当前仓库；指向旧路径/失效时自动重建。
-    let sameTarget = false;
-    try {
-      const target = fs.realpathSync(pluginLink);
-      const expected = fs.realpathSync(repoPlugin);
-      sameTarget = process.platform === 'win32'
-        ? String(target).toLowerCase() === String(expected).toLowerCase()
-        : String(target) === String(expected);
-    } catch {}
-    if (sameTarget) {
-      log(`plugin link already exists and points to this repo: ${pluginLink}`);
-      return pluginLink;
-    }
-    log(`plugin link exists but points elsewhere/broken, recreating: ${pluginLink}`);
-    fs.rmSync(pluginLink, { recursive: true, force: true });
-  }
-
-  try {
-    if (process.platform === 'win32') {
-      fs.symlinkSync(repoPlugin, pluginLink, 'junction');
-    } else {
-      fs.symlinkSync(repoPlugin, pluginLink, 'dir');
-    }
-    log(`plugin link created: ${pluginLink}`);
-  } catch (e) {
-    fatal(`failed to create plugin link: ${e.message}`);
-  }
-  return pluginLink;
-}
-
-function patchProfilePackage(pluginLink) {
-  const profileDir = path.join(DSH_HOME, 'profiles', PROFILE);
-  const pkgFile = path.join(profileDir, 'package.json');
-  ensureDir(profileDir);
-  let pkg = { name: `dsh-profile-${PROFILE}`, private: true, dependencies: {}, dsh: { profile: { bundles: [] } } };
-  if (fs.existsSync(pkgFile)) {
-    try {
-      pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
-    } catch (e) {
-      fatal(`failed to parse ${pkgFile}: ${e.message}`);
-    }
-  }
-  pkg.name = pkg.name || `dsh-profile-${PROFILE}`;
-  pkg.private = pkg.private !== false;
-  if (!pkg.dependencies || typeof pkg.dependencies !== 'object' || Array.isArray(pkg.dependencies)) pkg.dependencies = {};
-  pkg.dsh = pkg.dsh || {};
-  pkg.dsh.profile = pkg.dsh.profile || {};
-  if (!Array.isArray(pkg.dsh.profile.bundles)) pkg.dsh.profile.bundles = [];
-  const linkVal = `link:${pluginLink.replace(/\\/g, '/')}`;
-  if (pkg.dependencies['qq-mode-console'] !== linkVal) {
-    pkg.dependencies['qq-mode-console'] = linkVal;
-    log(`package.json dependency qq-mode-console -> ${linkVal}`);
-  }
-  if (!pkg.dsh.profile.bundles.includes('qq-mode-console')) {
-    pkg.dsh.profile.bundles.push('qq-mode-console');
-    log(`package.json bundle added: qq-mode-console`);
-  }
-  fs.writeFileSync(pkgFile, `${JSON.stringify(pkg, null, 2)}\n`, 'utf8');
-  log(`profile package.json ensured: ${pkgFile}`);
+  log(`cordis.patch.yml 已写入: ${patchFile}`);
 }
 
 function ensureLocalModeFile() {
   const stateDir = path.join(REPO_ROOT, 'state');
   const modeFile = path.join(stateDir, 'mode.json');
   if (fs.existsSync(modeFile)) {
-    log(`state/mode.json already exists; leave as-is (current mode may be user-configured)`);
+    log('state/mode.json 已存在，保持不动（可能是用户配置）');
+    return;
+  }
+  if (DRY_RUN) {
+    log(`would create ${modeFile} with mode=reserved2`);
     return;
   }
   ensureDir(stateDir);
   fs.writeFileSync(modeFile, `${JSON.stringify({ mode: 'reserved2', closedAgentPreset: 'router-standard' }, null, 2)}\n`, 'utf8');
-  log(`state/mode.json created with mode=reserved2 (fallback if DSH settings are not available)`);
+  log('state/mode.json 已创建（mode=reserved2，DSH settings 不可用时的兜底）');
 }
 
-// qq-mode-console 以 link: 依赖注册进 profile package.json 后，DSH 首次启动需要先安装一次
-// 才能解析该 bundle（否则 cold start 报 "cannot resolve profile bundle"）。dsh CLI 可用时自动执行。
-function autoInstallProfileBundles() {
-  const cmd = process.platform === 'win32' ? 'dsh.cmd' : 'dsh';
-  const r = spawnSync(cmd, ['plugin', '--profile', PROFILE, 'install'], {
-    encoding: 'utf8',
-    timeout: 120000,
-  });
-  if (r.error) {
-    log(`auto-install skipped: dsh CLI 未找到（${r.error.code || r.error.message}）。`);
-    log(`若 DSH 启动报“cannot resolve profile bundle \\"qq-mode-console\\"”，请手动执行：dsh plugin --profile ${PROFILE} install`);
-    return;
-  }
-  if (r.status === 0) {
-    log(`dsh plugin --profile ${PROFILE} install: OK`);
-  } else {
-    log(`dsh plugin --profile ${PROFILE} install 返回退出码 ${r.status}（若 DSH 启动报 bundle 解析失败，请手动重跑该命令）`);
-  }
-}
+log(`DSH_HOME = ${DSH_HOME}`);
+log(`profile  = ${PROFILE}`);
+log(`仓库     = ${REPO_ROOT}`);
+console.log('');
 
 copyPreset('qq-chat');
 copyPreset('qq-chat-v2');
 patchCordis();
-const pluginLink = ensurePluginLink();
-patchProfilePackage(pluginLink);
 ensureLocalModeFile();
-autoInstallProfileBundles();
-log('Done. Please restart DSH (or reload the profile) for the new presets/MCP to take effect.');
+
+console.log('');
+log('完成。下一步：');
+log('  1) DSH 的 preset 是按需从磁盘读取的，qq-chat / qq-chat-v2 立即生效，无需重启。');
+log('  2) profile 的 patch 层是 live reload 的，MCP 与 qq-mode 卡片通常也会即时生效；');
+log('     若没看到 mcp__snowluma__* 工具或 qq-mode 设置卡片，重启一次 DSH 即可。');
+log('  3) 本脚本不再改动 profile 的 package.json，也不依赖 dsh CLI。');

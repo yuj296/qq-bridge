@@ -11,7 +11,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
-import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
+import { NodeApiClient, unwrap, createTurnCollector, exitCleanly } from './dsh-client.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
@@ -248,6 +248,21 @@ function loadConfig() {
     ackMessage: file.ackMessage ?? '🤔 收到，正在思考…',
     sendDelayMs: file.sendDelayMs ?? 300,
     questionTimeoutMs: file.questionTimeoutMs ?? 5 * 60 * 1000,
+    // 把「不属于任何 QQ 会话」的 DSH 审批（也就是你自己在 DSH 里开的那些编码会话）
+    // 也转发到管理员私聊，人不在电脑前就能用手机批。默认开。
+    relayApprovalsToOwner: file.relayApprovalsToOwner !== false,
+    // 「DSH 任务完成」通知：只针对不属于任何 QQ 会话的会话（也就是你自己在 DSH 里
+    // 开的编码会话）。回合跑完、且静默一段时间没有后续回合，就给管理员私聊发一条。
+    notifyTaskDone: file.notifyTaskDone !== false,
+    // 只通知跑够这么久的回合 —— 否则日常一问一答也会 ping 你。
+    // 默认 5 分钟：只想知道「大任务」跑完了没。
+    notifyTaskDoneMinTurnMs: file.notifyTaskDoneMinTurnMs ?? 5 * 60 * 1000,
+    // 回合结束后再等这么久，期间若又开了新回合就说明活没干完，不通知。
+    notifyTaskDoneDebounceMs: file.notifyTaskDoneDebounceMs ?? 15 * 1000,
+    // 通知里最多带多少字的结果摘要。
+    notifyTaskDoneMaxChars: file.notifyTaskDoneMaxChars ?? 200,
+    // 扫描 DSH 会话列表的间隔（用于发现你在 DSH 里新开的会话）。
+    sessionDiscoveryMs: file.sessionDiscoveryMs ?? 30 * 1000,
     consolePort: file.consolePort ?? 3100,
     consoleToken: file.consoleToken ?? '',
     security: {
@@ -480,6 +495,7 @@ function loadConfig() {
 
 // ── 状态持久化（QQ 会话 ↔ DSH 会话映射） ─────────────────────────────────────
 let state = { sessions: {} };
+let activeApi = null; // 模块级引用：SIGINT/SIGTERM 用它拆掉 DSH 流载体（/api/remote.mux）
 function loadState() {
   const loaded = readJsonSafe(STATE_FILE, null);
   if (loaded && loaded.sessions && typeof loaded.sessions === 'object') state = loaded;
@@ -928,12 +944,14 @@ async function main() {
   async function ensureSlangLearnerSession() {
     if (slangLearnerSessionId) {
       learnerSessions.add(slangLearnerSessionId);
+      api.trackSession(slangLearnerSessionId);
       return slangLearnerSessionId;
     }
     const saved = readJsonSafe(SLANG_SESSION_FILE, null);
     if (saved?.sessionId) {
       slangLearnerSessionId = String(saved.sessionId);
       learnerSessions.add(slangLearnerSessionId);
+      api.trackSession(slangLearnerSessionId);
       return slangLearnerSessionId;
     }
     const dir = path.join(STATE_DIR, 'slang-agent');
@@ -949,6 +967,7 @@ async function main() {
     const value = unwrap(await api.sessions.create(params), 'slang session.create');
     slangLearnerSessionId = value.sessionId;
     learnerSessions.add(slangLearnerSessionId);
+    api.trackSession(slangLearnerSessionId);
     fs.mkdirSync(STATE_DIR, { recursive: true });
     atomicWriteJson(SLANG_SESSION_FILE, { sessionId: slangLearnerSessionId });
     log(`黑话学习会话已创建：${slangLearnerSessionId}`);
@@ -1182,7 +1201,13 @@ async function main() {
   }
 
   // DSH 侧
-  const api = new NodeApiClient(cfg.dsh.baseUrl);
+  // baseUrl 留默认（3080）时，客户端会自动从 DSH Desktop 的 harness.log
+  // 发现当前实例的真实端口与启动令牌（DSH Desktop 每次重启都会换端口/令牌）。
+  const api = new NodeApiClient(cfg.dsh.baseUrl).configure({
+    token: cfg.dsh.token,
+    harnessLog: cfg.dsh.harnessLog,
+  });
+  activeApi = api;
   const collectors = new Map(); // sessionId -> turn collector
   const sendToolSucceededSessions = new Set(); // sessionId：当前 turn 内 MCP 发送类工具至少成功一次
   const v2TurnStartAt = new Map(); // sessionId -> timestamp：reserved2 turn 开始时间，用于判断是否“无行动”
@@ -1196,7 +1221,10 @@ async function main() {
   const markReadCalledKeys = new Set();
   const wakeConfigMissCount = new Map();
   const reverse = new Map(); // sessionId -> conv key
-  for (const [key, sessionId] of Object.entries(state.sessions)) reverse.set(sessionId, key);
+  for (const [key, sessionId] of Object.entries(state.sessions)) {
+    reverse.set(sessionId, key);
+    api.trackSession(sessionId); // DSH 0.1.2：会话事件需按会话订阅
+  }
   const sessionPromises = new Map(); // key -> create promise（防并发重复创建）
   const promptQueues = new Map(); // key -> { queue: [], running: false }：每个 QQ 会话串行投递 DSH prompt，保证 turn 顺序
 
@@ -1374,6 +1402,12 @@ async function main() {
         dshReady = true;
         lastMode = currentMode;
         log(`DSH 已就绪（模式: ${currentMode}）`);
+        if (cfg.notifyTaskDone !== false && typeof api.startSessionDiscovery === 'function') {
+          // 「任务完成通知」需要看到你在 DSH 里自己开的会话，而桥接默认只订阅
+          // 它自己建的 QQ 会话 —— 这里把所有会话都纳入订阅。
+          api.startSessionDiscovery(cfg.sessionDiscoveryMs);
+          log(`已开启 DSH 会话发现（每 ${Math.round(cfg.sessionDiscoveryMs / 1000)}s 扫描，用于任务完成通知）`);
+        }
         if (currentMode === 'reserved2') {
           // 首次确定模式为 reserved2 后再恢复持久化的有限睡眠定时器，
           // 避免在 initial chat 模式下设置定时器导致 timeout 唤醒被模式守卫吞掉。
@@ -5126,6 +5160,7 @@ async function main() {
       }
       state.sessions[key] = sessionId;
       reverse.set(sessionId, key);
+      api.trackSession(sessionId); // DSH 0.1.2：会话事件需按会话订阅
       saveState();
       await ensureVisionModel(sessionId);
       log(`新会话 ${key} -> ${sessionId}（模式 ${currentMode}，preset: ${modePreset(key, currentMode, cfg) ?? '默认'}）`);
@@ -7581,12 +7616,91 @@ async function main() {
       if (pending.get(key) === entry) {
         pending.delete(key);
         log(`挂起请求超时 (${key})`);
-        cancelPendingEntry(entry).catch(() => {});
-        sendToQQ(key, '⏰ 等待回答超时，已取消该请求');
+        if (entry.kind === 'approval') {
+          // 审批不要替用户"拒绝"：网关把同一个 waterfall 同时广播给了所有客户端，
+          // 你人还在电脑前的话 GUI 那边也能点。拒了就等于替你做决定、还顺手把
+          // GUI 的审批权吃掉。改成 next 交还给服务端，GUI 仍可回答。
+          if (typeof api.delegatePending === 'function') {
+            api.delegatePending(entry.rpcId)
+              .then((ok) => { if (ok) log(`审批等待超时，已交还给 DSH（GUI 仍可回答） (${key})`); })
+              .catch((error) => log('交还审批失败:', error?.message ?? error));
+          } else {
+            cancelPendingEntry(entry).catch(() => {});
+          }
+          sendToQQ(key, '⏰ 审批等待超时，已交还给 DSH —— 你若还在电脑前，可以直接在 DSH 界面处理。');
+        } else {
+          cancelPendingEntry(entry).catch(() => {});
+          sendToQQ(key, '⏰ 等待回答超时，已取消该请求');
+        }
       }
     }, cfg.questionTimeoutMs);
     entry.timer = timer;
     pending.set(key, entry);
+  }
+
+  // 审批转发给管理员时附上会话来源（标题 · cwd），否则多会话并行时不知道该批哪个。
+  const sessionLabelCache = new Map(); // sessionId -> { label, at }
+  async function describeSession(sessionId) {
+    const cached = sessionLabelCache.get(sessionId);
+    if (cached && Date.now() - cached.at < 60000) return cached.label;
+    let label = String(sessionId ?? '');
+    try {
+      const list = unwrap(await api.sessions.list({}), 'session.list');
+      const row = list.items.find((s) => s.sessionId === sessionId);
+      if (row) {
+        const title = row.projections?.values?.title;
+        const cwd = row.cwd;
+        label = [title, cwd].filter(Boolean).join(' · ') || label;
+      }
+    } catch {}
+    sessionLabelCache.set(sessionId, { label, at: Date.now() });
+    return label;
+  }
+
+  // ── 「DSH 任务完成」通知 ────────────────────────────────────────────────
+  // 只处理不属于任何 QQ 会话的会话（你自己在 DSH 里开的编码会话）。
+  // 会话事件本来只订阅 QQ 会话，所以这里还得靠 api.startSessionDiscovery()
+  // 把所有会话都纳入订阅，否则根本收不到它们的事件。
+  const foreignTurns = new Map(); // sessionId -> { startedAt, timer, collector }
+
+  function noteForeignTurn(sessionId, event) {
+    if (cfg.notifyTaskDone === false || learnerSessions.has(sessionId)) return;
+    let state = foreignTurns.get(sessionId);
+    if (event.type === 'turn/start') {
+      // 新回合开始：撤销还没发出去的通知（说明这轮活还没干完）
+      if (state?.timer) clearTimeout(state.timer);
+      state = { startedAt: Date.now(), timer: null, collector: createTurnCollector() };
+      state.collector.push(event);
+      foreignTurns.set(sessionId, state);
+      return;
+    }
+    if (!state) return; // 桥接是中途启动的、没看到 turn/start：这一轮不管
+    const ended = state.collector.push(event);
+    if (!ended) return;
+    if (state.timer) clearTimeout(state.timer);
+    const durationMs = Date.now() - state.startedAt;
+    if (durationMs < cfg.notifyTaskDoneMinTurnMs) {
+      foreignTurns.delete(sessionId);
+      return;
+    }
+    state.timer = setTimeout(() => {
+      foreignTurns.delete(sessionId);
+      notifyTaskDone(sessionId, ended, durationMs).catch((error) => log('任务完成通知失败:', error?.message ?? error));
+    }, cfg.notifyTaskDoneDebounceMs);
+  }
+
+  async function notifyTaskDone(sessionId, ended, durationMs) {
+    const ownerKey = cfg.ownerQQ ? `private:${String(cfg.ownerQQ)}` : null;
+    if (!ownerKey) return;
+    const reason = ended.reason?.kind ?? 'unknown';
+    const icon = reason === 'completed' ? '✅' : reason === 'cancelled' ? '⏹️' : '⚠️';
+    const mins = durationMs / 60000;
+    const dur = mins >= 1 ? `${mins.toFixed(mins < 10 ? 1 : 0)} 分钟` : `${Math.round(durationMs / 1000)} 秒`;
+    const label = await describeSession(sessionId);
+    let text = String(ended.text ?? '').replace(/\s+/g, ' ').trim();
+    if (text.length > cfg.notifyTaskDoneMaxChars) text = `${text.slice(0, cfg.notifyTaskDoneMaxChars)}…`;
+    await sendToQQ(ownerKey, `${icon} DSH 任务完成（${dur} · ${reason}）\n会话：${label}${text ? `\n结果：${text}` : ''}`);
+    log(`任务完成通知已发 (${ownerKey})：${label} · ${dur}`);
   }
 
   // DSH 事件流 → QQ
@@ -7620,6 +7734,10 @@ async function main() {
                   // 旧学习会话 turn 结束后从集合移除，避免残留
                   if (frame.sessionId !== slangLearnerSessionId) learnerSessions.delete(frame.sessionId);
                 }
+              } else {
+                // 既不是 QQ 会话、也不是黑话学习会话 —— 就是你自己在 DSH 里开的编码会话。
+                // 收它的 turn 事件，用于「任务完成通知」。
+                noteForeignTurn(frame.sessionId, frame.event);
               }
               continue;
             }
@@ -7979,19 +8097,40 @@ async function main() {
             await sendToQQ(key, '❓ agent 需要你回答：\n' + lines.join('\n') + '\n（直接回复选项文字或输入你的回答）');
             await registerPending(key, { kind: 'question', rpcId: envelope.rpcId, sessionId: frame.sessionId, questions: frame.questions });
           } else if (frame.type === 'approval/requested') {
-            const key = reverse.get(frame.sessionId);
+            // 审批是管理员级操作。优先回它所属的 QQ 会话；没有映射的会话
+            // （你在 DSH 里自己开的编码会话）按配置转发到管理员私聊 —— 手机就能批。
+            const mapped = reverse.get(frame.sessionId);
+            const key = mapped ?? (cfg.relayApprovalsToOwner && cfg.ownerQQ ? `private:${String(cfg.ownerQQ)}` : null);
             if (!key) continue;
+            // 发给管理员私聊时不脱敏：审批的理由里通常就是目标路径/命令，
+            // 藏掉之后人只看到「（含敏感信息，已隐藏）」，等于闭着眼睛批权限。
+            // 群聊等其它会话仍然照旧审计，避免把本机信息泄露给别人。
+            const isOwnerChat = key === `private:${String(cfg.ownerQQ ?? '')}`;
             const rawReason = frame.reason ?? '';
-            const sensitiveReason = shouldAuditKey(key) && SENSITIVE_RE.test(rawReason);
+            const sensitiveReason = !isOwnerChat && shouldAuditKey(key) && SENSITIVE_RE.test(rawReason);
             if (sensitiveReason) log(`⚠️ 审批理由含敏感信息，已隐藏 (${key})`);
             const safeReason = sensitiveReason ? '（含敏感信息，已隐藏）' : rawReason;
             const reason = safeReason ? `\n理由：${safeReason}` : '';
             const rawToolName = frame.toolName ?? '';
-            const sensitiveTool = shouldAuditKey(key) && SENSITIVE_RE.test(rawToolName);
+            const sensitiveTool = !isOwnerChat && shouldAuditKey(key) && SENSITIVE_RE.test(rawToolName);
             if (sensitiveTool) log(`⚠️ 审批工具名含敏感信息，已隐藏 (${key})`);
             const safeToolName = sensitiveTool ? '（含敏感信息，已隐藏）' : rawToolName;
-            await sendToQQ(key, `🔐 agent 请求审批：${safeToolName}${reason}\n回复「通过」或「拒绝」`);
+            // 来自其它 DSH 会话时附上来源，否则多会话并行时不知道该批哪个。
+            const origin = mapped ? '' : `\n来自 DSH 会话：${await describeSession(frame.sessionId)}`;
+            await sendToQQ(key, `🔐 agent 请求审批：${safeToolName}${reason}${origin}\n回复「通过」或「拒绝」`);
+            log(`审批已转发 (${key})：${safeToolName}${mapped ? '' : ' [来自其它 DSH 会话]'}`);
             await registerPending(key, { kind: 'approval', rpcId: envelope.rpcId, sessionId: frame.sessionId, approvalId: frame.approvalId, toolName: frame.toolName });
+          } else if (frame.type === 'pending/cancelled') {
+            // 该请求已经在别处被回答了（最典型：你在 DSH GUI 里直接点了审批）。
+            // 撤下挂起即可，别再回执，否则会给 DSH 发一个已经过期的回答。
+            for (const [pendingKey, entry] of pending) {
+              if (entry.rpcId === envelope.rpcId) {
+                clearTimeout(entry.timer);
+                pending.delete(pendingKey);
+                log(`挂起请求已在别处回答，已撤下 (${pendingKey})`);
+                break;
+              }
+            }
           } else if (frame.type === 'stream/error') {
             log('事件流错误:', frame.error);
           }
@@ -8062,12 +8201,14 @@ process.on('SIGINT', () => {
   log('退出中…');
   saveState();
   releaseLock();
-  process.exit(0);
+  activeApi?.close(); // 先把 /api/remote.mux 的 WebSocket 拆掉
+  exitCleanly(0); // 推迟一个 tick：同步 process.exit 会和在途 fetch 抢跑，触发 libuv 断言
 });
 process.on('SIGTERM', () => {
   saveState();
   releaseLock();
-  process.exit(0);
+  activeApi?.close();
+  exitCleanly(0);
 });
 process.on('unhandledRejection', (error) => log('未处理异常:', error?.message ?? error));
 process.on('exit', () => releaseLock());

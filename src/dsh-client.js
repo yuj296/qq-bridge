@@ -1,101 +1,696 @@
-// Node 环境的 DSH Web API 客户端。
-// 协议：unary RPC 走 POST /api/<method>（fetch），事件流走 WebSocket 下行（/api/events.mux、/api/events.host）。
-// 复用官方 @deepseek-ai/dsh-host-apiproxy 的 AbstractApiClient 与 zod schema，只替换传输层。
-import { AbstractApiClient } from '@deepseek-ai/dsh-host-apiproxy/client';
-import { serverRequestSchema } from '@deepseek-ai/dsh-host-apiproxy/api/rpc.schema';
-import { muxFrameSchema, hostFrameSchema } from '@deepseek-ai/dsh-host-apiproxy/api/events.schema';
+// DSH Web API 客户端 —— 适配 DSH 0.1.2 gateway 协议
+//
+// 与 0.1.1（@deepseek-ai/dsh-host-apiproxy）的差异，本文件负责全部抹平：
+//   1. 鉴权：0.1.2 起每次 Host API 调用都要先鉴权。启动令牌只以
+//      `GET /?token=<token>` 的形式在根路径被接受（不在 /api 路径上，也不在
+//      Authorization 头里），换回一个 dsh-auth-* 会话 cookie，之后每个请求
+//      （含 /api/remote.mux 的 WebSocket 升级）都带该 cookie。
+//   2. 一元 RPC：POST /api/<namespace>/<method>（斜杠，不是点），
+//      body = { type:'client-request', rpcId, method, payload:{ args } }。
+//   3. 服务端下行事件：老的全局 /api/events.mux 已不存在。会话事件改为
+//      每个会话一条 `session/follow` 流；提问/审批改走 `$events` waterfall。
+//   4. 流载体：/api/remote.mux WebSocket，
+//      客户端发 { type:'open', streamId, endpoint, payload:{args} }，
+//      服务端回 { type:'item'|'end'|'error', streamId, ... }。
+//
+// 本文件对外保留 0.1.1 版的调用面（sessions/workspace/settings/agentPresets/
+// host/events.mux/respond）与返回契约（{ rpcId, result:{ ok, value|error } }），
+// 因此 bridge.js 的业务逻辑基本无需改动。
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import WebSocket from 'ws';
 
-export class NodeApiClient extends AbstractApiClient {
-  constructor(baseUrl, timeoutMs) {
-    super(timeoutMs);
-    this.baseUrl = String(baseUrl ?? 'http://127.0.0.1:3080').replace(/\/+$/, '');
+const DEFAULT_BASE = 'http://127.0.0.1:3080';
+
+/** 简易异步队列：把 push 式事件源转成 async iterator。 */
+class AsyncQueue {
+  #items = [];
+  #waiters = [];
+  #closed = false;
+  #error = null;
+
+  push(item) {
+    if (this.#closed) return;
+    const waiter = this.#waiters.shift();
+    if (waiter) waiter.resolve({ value: item, done: false });
+    else this.#items.push(item);
   }
 
-  /** Node 没有 location；把 base 固定为配置的 DSH 地址（回环地址天然通过 /api 信任栅栏）。 */
+  close(error) {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#error = error ?? null;
+    for (const waiter of this.#waiters.splice(0)) {
+      if (this.#error) waiter.reject(this.#error);
+      else waiter.resolve({ value: undefined, done: true });
+    }
+  }
+
+  [Symbol.asyncIterator]() {
+    return {
+      next: () => {
+        if (this.#items.length > 0) return Promise.resolve({ value: this.#items.shift(), done: false });
+        if (this.#error) return Promise.reject(this.#error);
+        if (this.#closed) return Promise.resolve({ value: undefined, done: true });
+        return new Promise((resolve, reject) => this.#waiters.push({ resolve, reject }));
+      },
+    };
+  }
+}
+
+/** DSH Desktop 把 `dsh web: <url>?token=…` 写进 harness.log；据此发现当前实例。 */
+function harnessLogCandidates() {
+  const out = [];
+  const explicit = process.env.DSH_HARNESS_LOG;
+  if (explicit) out.push(explicit);
+  const home = os.homedir();
+  const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+  out.push(path.join(appData, 'dsh-desktop', 'logs', 'harness.log'));
+  out.push(path.join(home, '.dsh', 'logs', 'harness.log'));
+  return [...new Set(out)];
+}
+
+/** 从 harness.log 里取最后一次启动的 base 与 token。 */
+function discoverHarness(logFile) {
+  const file = logFile || harnessLogCandidates().find((p) => fs.existsSync(p));
+  if (!file) return null;
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+  let found = null;
+  const re = /dsh web:\s*(https?:\/\/[^\s?]+)\/?\?token=(\S+)/g;
+  for (const match of text.matchAll(re)) found = { base: match[1].replace(/\/+$/, ''), token: match[2], file };
+  return found;
+}
+
+export class NodeApiClient {
+  constructor(baseUrl, timeoutMs = 30000) {
+    this.timeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 30000;
+    this.explicitBase = String(baseUrl ?? '').trim() || null;
+    this.explicitToken = process.env.DSH_HARNESS_TOKEN || null;
+    this.harnessLog = null;
+    this.cookie = null;
+    this.authBase = null;
+    this.tracked = new Set();
+    this.trackListeners = new Set();
+    this.liveSessions = new Set(); // 已确认 session/follow 生效（能收到事件）的会话
+    this.readyWaiters = new Map(); // sessionId -> Set<resolve>：等 follow 生效的调用方
+    this.mux = null;
+    this.remoteClients = new Map(); // eventId -> { clientId, kind }
+    this.remoteClientId = null;
+    this.base = this.explicitBase || DEFAULT_BASE;
+  }
+
+  /** 允许 bridge 显式指定令牌/harness.log（可选；默认自动发现）。 */
+  configure({ token, harnessLog, baseUrl } = {}) {
+    if (token) this.explicitToken = String(token);
+    if (harnessLog) this.harnessLog = String(harnessLog);
+    if (baseUrl) {
+      this.explicitBase = String(baseUrl).replace(/\/+$/, '');
+      this.base = this.explicitBase;
+    }
+    return this;
+  }
+
   resolveBase() {
-    return this.baseUrl;
+    // 配置里等于出厂默认端口时，优先用自动发现的实例（DSH Desktop 每次重启都会换端口）。
+    const discovered = discoverHarness(this.harnessLog);
+    if (discovered) {
+      if (!this.explicitBase || this.explicitBase === DEFAULT_BASE) this.base = discovered.base;
+      if (!this.explicitToken) this.token = discovered.token;
+    }
+    if (this.explicitToken) this.token = this.explicitToken;
+    return this.base;
   }
 
-  doFetch(input, init) {
-    return fetch(input, init);
+  /** 令牌换 cookie；401 时会自动重新发现令牌（DSH 重启后令牌会变）。 */
+  async authenticate(force = false) {
+    const base = this.resolveBase();
+    if (!force && this.cookie && this.authBase === base) return this.cookie;
+    const token = this.token;
+    if (!token) {
+      throw new Error(
+        `DSH 启动令牌未知：请设置 dsh.token，或确保 DSH Desktop 的 harness.log 可读（已尝试：${harnessLogCandidates().join(', ')}）`,
+      );
+    }
+    const response = await fetch(`${base}/?token=${encodeURIComponent(token)}`, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    const setCookie = typeof response.headers.getSetCookie === 'function' ? response.headers.getSetCookie() : [];
+    const cookie = setCookie.map((value) => value.split(';')[0]).join('; ');
+    if (!cookie) {
+      throw new Error(`DSH 鉴权失败：GET ${base}/?token=… 返回 HTTP ${response.status} 且未下发会话 cookie`);
+    }
+    this.cookie = cookie;
+    this.authBase = base;
+    return cookie;
   }
 
-  openMux(_payload, signal, onOpen) {
-    return this.readWebSocket('/api/events.mux', signal, muxFrameSchema, onOpen);
+  async #post(pathname, body) {
+    const base = this.resolveBase();
+    await this.authenticate();
+    const headers = { 'content-type': 'application/json' };
+    if (this.cookie) headers.cookie = this.cookie;
+    const response = await fetch(new URL(pathname, base), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    if (response.status === 401) {
+      // cookie 失效（DSH 重启 / 令牌轮换）：重新换一次再试一遍。
+      await this.authenticate(true);
+      const retryHeaders = { 'content-type': 'application/json' };
+      if (this.cookie) retryHeaders.cookie = this.cookie;
+      return fetch(new URL(pathname, base), {
+        method: 'POST',
+        headers: retryHeaders,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    }
+    return response;
   }
 
-  openHost(_payload, signal, onOpen) {
-    return this.readWebSocket('/api/events.host', signal, hostFrameSchema, onOpen);
+  /**
+   * 一元调用。返回 { rpcId, result:{ ok:true, value } | { ok:false, error } }，
+   * 与 0.1.1 版 AbstractApiClient.callUnary 的返回契约一致（unwrap 可直接用）。
+   */
+  async callUnary(endpoint, args = {}, signal) {
+    const rpcId = crypto.randomUUID();
+    const message = { type: 'client-request', rpcId, method: endpoint, payload: { args } };
+    const response = await this.#post(`/api/${endpoint}`, message);
+    if (response.status === 404) {
+      throw new Error(
+        `transport failure for /api/${endpoint}: HTTP 404（该端点在本 DSH 版本不存在或已改名）`,
+      );
+    }
+    if (!response.ok) throw new Error(`transport failure for /api/${endpoint}: HTTP ${response.status}`);
+    let full;
+    try {
+      full = await response.json();
+    } catch (error) {
+      throw new Error(`transport failure for /api/${endpoint}: 响应不是 JSON（${error?.message ?? error}）`);
+    }
+    if (full?.type !== 'server-response' || typeof full.rpcId !== 'string') {
+      throw new Error(`transport failure for /api/${endpoint}: 响应信封非法`);
+    }
+    if (full.rpcId !== rpcId) {
+      throw new Error(`rpcId mismatch for ${endpoint}: sent ${rpcId}, got ${full.rpcId}`);
+    }
+    return { rpcId: full.rpcId, result: full.result };
   }
 
-  /** 与浏览器 WebApiClient 相同的下行协议：只读 WebSocket，文本帧即 server-request 信封。 */
-  async *readWebSocket(path, signal, frameSchema, onOpen) {
-    // 调用方不传 signal 时自建一个（Node 端 pump 常省略该参数）
-    const own = signal === undefined ? new AbortController() : undefined;
-    const sig = signal ?? own.signal;
-    const url = new URL(path, this.baseUrl);
-    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-    const socket = new WebSocket(url);
-    const inbox = [];
-    let wake;
-    const enqueue = (item) => {
-      inbox.push(item);
-      wake?.();
-      wake = undefined;
-    };
-    const handleOpen = () => {
-      // DSH 的 events.mux / events.host 是“仅下行”WebSocket：
-      // 服务端收到任何客户端消息都会以 1008 downlink only 关闭，
-      // 因此不能做应用层 ping/pong，也不应因“一段时间没有下行消息”就主动断开。
-      // 之前 90s 空闲 watchdog 是日志里频繁“连接 DSH 事件流…”的根源。
-      // 现在改为长连接保活：不因空闲主动 close；
-      // 断线/重启由 WebSocket close/error 事件驱动，桥接另有 5s 一次的 HTTP checkDsh 兜底。
-      onOpen?.();
-    };
-    const handleMessage = (event) => {
-      let full;
-      let frame;
+  // ---------------------------------------------------------------- 流载体
+
+  #muxSocket() {
+    if (this.mux && this.mux.ws.readyState === WebSocket.OPEN) return this.mux;
+    if (this.mux) {
       try {
-        if (typeof event.data !== 'string') throw new Error('binary WebSocket frame');
-        full = serverRequestSchema.parse(JSON.parse(event.data));
-        frame = frameSchema.parse(full.payload);
-      } catch (error) {
-        console.error(`[dsh-client] dropping malformed WebSocket frame on ${path}:`, error);
+        this.mux.ws.terminate();
+      } catch {}
+    }
+    const streams = new Map();
+    const wsUrl = new URL('/api/remote.mux', this.resolveBase());
+    wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(wsUrl, { headers: this.cookie ? { cookie: this.cookie } : {} });
+    const mux = { ws, streams };
+    ws.on('message', (data) => {
+      let message;
+      try {
+        message = JSON.parse(String(data));
+      } catch {
         return;
       }
-      this.onEnvelope(full);
-      enqueue({ kind: 'frame', envelope: { rpcId: full.rpcId, payload: frame } });
+      const stream = streams.get(message.streamId);
+      if (!stream) return;
+      if (message.type === 'item') stream.queue.push({ value: message.value });
+      else if (message.type === 'end') stream.queue.close();
+      else if (message.type === 'error') {
+        stream.queue.close(
+          new Error(`DSH 流 ${stream.endpoint} 失败：${message.error?.code}: ${message.error?.message}`),
+        );
+      }
+    });
+    ws.on('close', () => {
+      for (const stream of streams.values()) stream.queue.close(new Error('DSH 流载体已断开（/api/remote.mux）'));
+      streams.clear();
+      if (this.mux === mux) this.mux = null;
+    });
+    ws.on('error', (error) => {
+      for (const stream of streams.values()) stream.queue.close(error);
+      streams.clear();
+      if (this.mux === mux) this.mux = null;
+    });
+    this.mux = mux;
+    return mux;
+  }
+
+  /** 打开一条流式 Remote，返回 async iterator（产出每个 item 的 value）。 */
+  async *openStream(endpoint, args = {}, signal) {
+    await this.authenticate();
+    const mux = this.#muxSocket();
+    const streamId = crypto.randomUUID();
+    const queue = new AsyncQueue();
+    mux.streams.set(streamId, { queue, endpoint });
+    const onAbort = () => {
+      try {
+        mux.ws.send(JSON.stringify({ type: 'cancel', streamId }));
+      } catch {}
+      queue.close();
     };
-    const handleClose = () => enqueue({ kind: 'end' });
-    const handleError = () => enqueue({ kind: 'end' });
-    const handleAbort = () => {
-      if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) socket.close();
-    };
-    socket.addEventListener('open', handleOpen);
-    socket.addEventListener('message', handleMessage);
-    socket.addEventListener('close', handleClose, { once: true });
-    socket.addEventListener('error', handleError, { once: true });
-    sig.addEventListener('abort', handleAbort, { once: true });
-    if (sig.aborted) handleAbort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const send = () => mux.ws.send(JSON.stringify({ type: 'open', streamId, endpoint, payload: { args } }));
+    if (mux.ws.readyState === WebSocket.OPEN) send();
+    else mux.ws.once('open', send);
     try {
-      while (true) {
-        while (inbox.length > 0) {
-          const item = inbox.shift();
-          if (item.kind === 'end') return;
-          yield item.envelope;
+      for await (const item of queue) yield item.value;
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+      mux.streams.delete(streamId);
+      try {
+        if (mux.ws.readyState === WebSocket.OPEN) mux.ws.send(JSON.stringify({ type: 'cancel', streamId }));
+      } catch {}
+    }
+  }
+
+  /** 取一次流的首个匹配项后立即关闭（用于把流式 baseline 当作一次性读取）。 */
+  async #firstOf(endpoint, args, predicate) {
+    const abort = new AbortController();
+    try {
+      for await (const value of this.openStream(endpoint, args, abort.signal)) {
+        if (!predicate || predicate(value)) return value;
+      }
+      return null;
+    } finally {
+      abort.abort();
+    }
+  }
+
+  // ------------------------------------------------------- 会话事件多路复用
+
+  /** 登记需要接收事件的 DSH 会话（bridge 建会话/恢复会话时调用）。 */
+  trackSession(sessionId) {
+    const id = String(sessionId ?? '');
+    if (!id || this.tracked.has(id)) return;
+    this.tracked.add(id);
+    for (const listener of this.trackListeners) listener(id, true);
+  }
+
+  untrackSession(sessionId) {
+    const id = String(sessionId ?? '');
+    if (!this.tracked.delete(id)) return;
+    this.#settleReadyWaiters(id, false);
+    for (const listener of this.trackListeners) listener(id, false);
+  }
+
+  /** 该会话的 follow 流是否已生效（事件能收到了）。 */
+  isSessionLive(sessionId) {
+    return this.liveSessions.has(String(sessionId ?? ''));
+  }
+
+  /**
+   * 等某个被登记会话的 follow 流生效，最多等 timeoutMs。
+   *
+   * 为什么需要：DSH 0.1.2 的会话事件是按会话订阅的，`session/follow` 从发起到真正
+   * 生效有一个往返。若在这之前就投 prompt，开头的 `turn/start` 会落在 follow 建立
+   * 之前的窗口里，collector 就收不到完整的回合（实测表现为只收到 turn/end、
+   * 收不到 turn/start）。sessions.prompt 内部会自动等这道闸门。
+   *
+   * @returns 是否已就绪（超时返回 false，不抛错）
+   */
+  async waitForSessionReady(sessionId, timeoutMs = 5000) {
+    const id = String(sessionId ?? '');
+    if (!id) return false;
+    if (this.liveSessions.has(id)) return true;
+    if (!this.tracked.has(id)) return false; // 没登记就永远不会 follow，别白等
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (ok) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.readyWaiters.get(id)?.delete(done);
+        resolve(ok);
+      };
+      const timer = setTimeout(() => done(false), Math.max(1, timeoutMs));
+      const waiters = this.readyWaiters.get(id) ?? new Set();
+      waiters.add(done);
+      this.readyWaiters.set(id, waiters);
+    });
+  }
+
+  #markSessionLive(sessionId) {
+    const id = String(sessionId);
+    this.liveSessions.add(id);
+    this.#settleReadyWaiters(id, true);
+  }
+
+  #settleReadyWaiters(sessionId, ok) {
+    const waiters = this.readyWaiters.get(sessionId);
+    if (!waiters) return;
+    this.readyWaiters.delete(sessionId);
+    for (const done of [...waiters]) done(ok);
+  }
+
+  /**
+   * 周期性地把 DSH 里所有会话都纳入事件订阅。
+   *
+   * 用途：像「任务完成通知」这种全局特性，需要看到你在 DSH 里自己开的那些
+   * 编码会话的 turn/end —— 而桥接默认只订阅它自己建的 QQ 会话。
+   *
+   * 子代理会话（有 parentSessionId）不订阅：它们的事件属于父回合内部，
+   * 单独通知只会变成噪音。
+   *
+   * @param intervalMs 重新扫描会话列表的间隔
+   */
+  startSessionDiscovery(intervalMs = 30000) {
+    if (this.discoveryTimer) return;
+    const tick = async () => {
+      try {
+        const response = await this.sessions.list({});
+        if (!response?.result?.ok) return;
+        for (const item of response.result.value?.items ?? []) {
+          if (item?.parentSessionId) continue;
+          if (item?.sessionId) this.trackSession(item.sessionId);
         }
-        await new Promise((resolve) => {
-          wake = resolve;
+      } catch {
+        // DSH 没起来 / 重启中：下一轮再试
+      }
+    };
+    void tick();
+    this.discoveryTimer = setInterval(tick, Math.max(5000, intervalMs));
+    this.discoveryTimer.unref?.();
+  }
+
+  stopSessionDiscovery() {
+    if (this.discoveryTimer) {
+      clearInterval(this.discoveryTimer);
+      this.discoveryTimer = null;
+    }
+  }
+
+  /**
+   * 兼容 0.1.1 的全局事件流：把 (a) 提问/审批的 $events waterfall 与
+   * (b) 每个被登记会话的 session/follow 事件，合并成同一种信封
+   * { rpcId, payload: <frame> } 产出。
+   */
+  events = {
+    mux: (payload, signal, onOpen) => this.#muxAll(onOpen, signal),
+  };
+
+  async *#muxAll(onOpen, externalSignal) {
+    const queue = new AsyncQueue();
+    const root = new AbortController();
+    // abort 必须同时关掉 queue：否则生成器会永远挂在 `for await (const frame of queue)`
+    // 上，finally 不执行、调用方的 `await muxTask` 也永远不返回（实测会把测试脚本挂死）。
+    root.signal.addEventListener('abort', () => queue.close(), { once: true });
+    if (externalSignal) {
+      if (externalSignal.aborted) root.abort();
+      else externalSignal.addEventListener('abort', () => root.abort(), { once: true });
+    }
+    const sessionPumps = new Map(); // sessionId -> AbortController
+
+    // mux 启动时就已登记的会话（桥接重启后从 state/sessions.json 恢复的）只收实时事件：
+    // 回放它们的 snapshot 会把历史回合重新走一遍，可能导致旧回复被重复发到 QQ。
+    // 反之，mux 运行期间才登记的会话是桥接刚建的：follow 若比第一回合建得慢，
+    // 事件会全落进 snapshot，此时必须回放，否则会漏掉第一轮。
+    const restored = new Set(this.tracked);
+    // 本次 mux 的 follow 还没建立，旧的"已生效"结论作废。
+    this.liveSessions.clear();
+
+    // onOpen 必须等各条流真正接上再回调：调用方（self-test / 桥接）据此决定
+    // 何时投 prompt，早回调会漏掉开头的 turn 事件。
+    const sessionReady = new Set();
+    let eventsReady = false;
+    let openedOnce = false;
+    const fireOpen = () => {
+      if (openedOnce) return;
+      openedOnce = true;
+      onOpen?.();
+    };
+    const maybeOpen = () => {
+      if (openedOnce || !eventsReady) return;
+      for (const id of this.tracked) if (!sessionReady.has(id)) return;
+      fireOpen();
+    };
+    const openFallback = setTimeout(fireOpen, 8000);
+
+    // 每个会话一条 session/follow；断了就退避重连，不影响其它会话。
+    const pumpSession = (sessionId) => {
+      if (sessionPumps.has(sessionId)) return;
+      const controller = new AbortController();
+      sessionPumps.set(sessionId, controller);
+      root.signal.addEventListener('abort', () => controller.abort(), { once: true });
+      let failures = 0;
+      void (async () => {
+        while (!controller.signal.aborted && !root.signal.aborted) {
+          let gotItem = false;
+          try {
+            for await (const value of this.openStream(
+              'session/follow',
+              { request: { address: { kind: 'session', sessionId }, maxMessages: 20 } },
+              controller.signal,
+            )) {
+              gotItem = true;
+              // 首个 item 是 snapshot，说明这条 follow 已经生效（可以安全投 prompt 了）。
+              if (!sessionReady.has(sessionId)) {
+                sessionReady.add(sessionId);
+                this.#markSessionLive(sessionId);
+                maybeOpen();
+              }
+              if (value?.type === 'event') {
+                queue.push({ rpcId: 'event', payload: { type: 'session/event', sessionId, event: value.event } });
+                continue;
+              }
+              if (value?.type === 'snapshot' && !restored.has(sessionId)) {
+                // 新会话的 follow 若比第一回合建立得慢，事件会全落在 snapshot 里；
+                // 回放它，否则桥接漏掉第一轮（chunks 是流式增量，跳过。
+                // 重启恢复的会话在上面的 restored 分支里被排除，不受影响）。
+                for (const rec of value.records ?? []) {
+                  if (rec?.type !== 'event') continue;
+                  queue.push({ rpcId: 'snapshot', payload: { type: 'session/event', sessionId, event: rec.event } });
+                }
+              }
+            }
+          } catch {
+            // 流断开（DSH 重启、会话归档等）：落到下面统一退避重连。
+          }
+          if (controller.signal.aborted || root.signal.aborted) break;
+          // 反复拿不到任何数据（例如会话已归档、id 失效）：别 2 秒一次无限重连，
+          // 退避几次之后直接放弃这个会话。
+          failures = gotItem ? 0 : failures + 1;
+          if (failures >= 5) {
+            this.untrackSession(sessionId);
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, Math.min(2000 * failures, 15000)));
+        }
+        sessionPumps.delete(sessionId);
+      })();
+    };
+
+    const stopSession = (sessionId) => sessionPumps.get(sessionId)?.abort();
+
+    const onTrack = (sessionId, tracked) => (tracked ? pumpSession(sessionId) : stopSession(sessionId));
+    this.trackListeners.add(onTrack);
+    for (const sessionId of this.tracked) pumpSession(sessionId);
+
+    // $events 是关键通道（提问/审批）：它一断就让整条 mux 结束，
+    // 由 bridge 的外层重连循环整体重建，避免无声失聪。
+    const eventsTask = (async () => {
+      try {
+        for await (const value of this.openStream('$events', {}, root.signal)) {
+          if (value?.type === 'ready') {
+            this.remoteClientId = value.clientId;
+            eventsReady = true;
+            maybeOpen();
+            continue;
+          }
+          if (value?.type === 'cancel') {
+            // 该请求已经在别处被回答了（最典型的是用户在 DSH GUI 里直接点了审批），
+            // 网关会推一帧 cancel。这里必须把挂起撤下来，否则上层会拿着一个
+            // 已经失效的审批空等超时，之后回复还会报错。
+            const known = this.remoteClients.get(value.eventId);
+            if (known) {
+              this.remoteClients.delete(value.eventId);
+              queue.push({
+                rpcId: value.eventId,
+                payload: { type: 'pending/cancelled', sessionId: known.sessionId ?? null },
+              });
+            }
+            continue;
+          }
+          if (value?.type !== 'waterfall') continue;
+          this.#forwardWaterfall(queue, value);
+        }
+        if (!root.signal.aborted) throw new Error('DSH $events 流已结束');
+      } catch (error) {
+        if (!root.signal.aborted) queue.close(error instanceof Error ? error : new Error(String(error)));
+      }
+    })();
+
+    try {
+      for await (const frame of queue) yield frame;
+    } finally {
+      clearTimeout(openFallback);
+      root.abort();
+      this.trackListeners.delete(onTrack);
+      await eventsTask.catch(() => {});
+    }
+  }
+
+  /** 把 $events 的 waterfall 请求翻译成 0.1.1 版的 question/approval 帧。 */
+  #forwardWaterfall(queue, value) {
+    const eventId = value.eventId;
+    const clientId = this.remoteClientId;
+    if (!eventId || !clientId) return;
+    const sessionId = value.agentId ?? value.request?.sessionId ?? null;
+    if (value.event === 'user-questions/request') {
+      this.remoteClients.set(eventId, { clientId, kind: 'question', sessionId });
+      queue.push({
+        rpcId: eventId,
+        payload: { type: 'question/requested', sessionId, questions: value.request?.questions ?? [] },
+      });
+      return;
+    }
+    if (value.event === 'approval/request') {
+      this.remoteClients.set(eventId, { clientId, kind: 'approval', sessionId });
+      queue.push({
+        rpcId: eventId,
+        payload: {
+          type: 'approval/requested',
+          sessionId,
+          approvalId: value.request?.approvalId ?? eventId,
+          toolName: value.request?.toolName ?? '',
+          reason: value.request?.reason,
+        },
+      });
+      return;
+    }
+    // 其它 waterfall（例如计划评审）本桥接不处理：交还给服务端顺延给下一个 answerer。
+    void this.#settleRemoteEvent(eventId, clientId, { kind: 'next' });
+  }
+
+  /**
+   * 放弃处理某个挂起请求，交还给服务端顺延给下一个 answerer。
+   *
+   * 用途：审批请求同时被桥接和 DSH GUI 收到（网关把 waterfall 广播给所有客户端）。
+   * 桥接发到 QQ 后如果一直没人回，不应该"拒绝"——那等于替用户做了决定，
+   * 还会把 GUI 那边的审批权一起吃掉。改成 next，GUI 就仍然能回答。
+   *
+   * @returns 是否确实放弃了一个挂起请求
+   */
+  async delegatePending(rpcId) {
+    const known = this.remoteClients.get(String(rpcId ?? ''));
+    if (!known) return false;
+    this.remoteClients.delete(String(rpcId));
+    await this.#settleRemoteEvent(String(rpcId), known.clientId, { kind: 'next' });
+    return true;
+  }
+
+  async #settleRemoteEvent(eventId, clientId, outcome) {
+    const response = await this.callUnary('$events/result', { clientId, eventId, outcome });
+    return response;
+  }
+
+  /**
+   * 兼容 0.1.1 的 respond：bridge 用旧形状回执
+   *   question → result.value = { sessionId, answer: { answers } }
+   *   approval → result.value = { sessionId, approvalId, outcome }
+   * 这里翻译成 0.1.2 的 waterfall outcome。
+   */
+  async respond(message) {
+    const rpcId = message?.rpcId;
+    const value = message?.result?.value;
+    if (!rpcId) throw new Error('respond: 缺少 rpcId');
+    if (message?.result?.ok === false) {
+      const known = this.remoteClients.get(rpcId);
+      this.remoteClients.delete(rpcId);
+      if (known) {
+        await this.#settleRemoteEvent(rpcId, known.clientId, {
+          kind: 'rejected',
+          error: { name: 'Error', message: String(message.result.error?.message ?? 'client rejected') },
         });
       }
-    } finally {
-      sig.removeEventListener('abort', handleAbort);
-      socket.removeEventListener('open', handleOpen);
-      socket.removeEventListener('message', handleMessage);
-      socket.removeEventListener('close', handleClose);
-      socket.removeEventListener('error', handleError);
-      own?.abort();
-      handleAbort();
+      return { accepted: true };
+    }
+    const known = this.remoteClients.get(rpcId);
+    if (!known) throw new Error(`respond: 未知的挂起请求 ${rpcId}（可能已超时或被取消）`);
+    this.remoteClients.delete(rpcId);
+    if (known.kind === 'question') {
+      const answer = value?.answer ?? { answers: [] };
+      await this.#settleRemoteEvent(rpcId, known.clientId, { kind: 'result', value: answer });
+      return { accepted: true };
+    }
+    const outcome = value?.outcome === 'allowed-once' ? 'allowed-once' : 'rejected';
+    await this.#settleRemoteEvent(rpcId, known.clientId, { kind: 'result', value: outcome });
+    return { accepted: true };
+  }
+
+  // ------------------------------------------------------- 兼容调用面
+
+  sessions = {
+    create: (request = {}) => this.callUnary('session/create', { request }),
+    prompt: async (request = {}) => {
+      // 先等该会话的 follow 流生效再投递：否则这一轮开头的 turn/start 会漏掉，
+      // 上层 createTurnCollector 就拼不出完整回合（详见 waitForSessionReady）。
+      if (request.sessionId) await this.waitForSessionReady(request.sessionId, 5000);
+      return this.callUnary('session/prompt', {
+        request: {
+          requestId: crypto.randomUUID(),
+          sessionId: request.sessionId,
+          mode: request.mode === 'steer' ? 'steer' : 'queue',
+          content: Array.isArray(request.content) ? request.content : [],
+          ...(request.clientTimeZone ? { clientTimeZone: request.clientTimeZone } : {}),
+        },
+      });
+    },
+    selectModel: (request = {}) => this.callUnary('session/selectModel', { request }),
+    cancel: (request = {}) => this.callUnary('session/cancel', { request }),
+    rename: (request = {}) => this.callUnary('session/rename', { request }),
+    list: (request = {}) => this.callUnary('session/list', { _request: request }),
+  };
+
+  workspace = {
+    create: (request = {}) => this.callUnary('workspace/create', { request }),
+    rename: (request = {}) => this.callUnary('workspace/rename', { request }),
+    delete: (request = {}) => this.callUnary('workspace/delete', { request }),
+    archiveSession: (request = {}) => this.callUnary('workspace/archiveSession', { request }),
+    // 0.1.2 没有 workspace/list：取 workspace/follow 的 baseline 当一次性读取。
+    list: async () => {
+      const baseline = await this.#firstOf('workspace/follow', {}, (value) => value?.type === 'baseline');
+      return { rpcId: crypto.randomUUID(), result: { ok: true, value: { items: baseline?.value?.items ?? [] } } };
+    },
+  };
+
+  settings = {
+    describe: () => this.callUnary('settings/describe', {}),
+  };
+
+  agentPresets = {
+    list: () => this.callUnary('agentPresets/list', {}),
+  };
+
+  host = {
+    // 0.1.2 没有 host/describe；bridge 只用它做 DSH 存活探测，这里换成真实轻量调用。
+    describe: () => this.callUnary('agentPresets/list', {}),
+  };
+
+  close() {
+    if (this.mux) {
+      try {
+        // 用 terminate 而不是 close：优雅关闭的握手会和进程退出抢跑，
+        // 在 Windows 上触发 libuv 断言（async.c: UV_HANDLE_CLOSING）。
+        this.mux.ws.terminate();
+      } catch {}
+      this.mux = null;
     }
   }
 }
@@ -140,7 +735,7 @@ export function createTurnCollector() {
     },
     has(turn) {
       return turns.has(turn);
-    }
+    },
   };
 }
 
@@ -150,4 +745,14 @@ export function blocksToText(content) {
     .filter((b) => b?.type === 'text' && typeof b.text === 'string')
     .map((b) => b.text)
     .join('');
+}
+
+/**
+ * 干净退出。不要在 await 完成的同一个 tick 里直接 `process.exit()`：
+ * 那会和 undici 在途的异步句柄抢跑，在 Windows / Node 24 上触发
+ * libuv 断言 `async.c: UV_HANDLE_CLOSING`（实测 exit code 变成 -1073740791）。
+ * 推迟一个 tick 即可规避。
+ */
+export function exitCleanly(code = 0) {
+  setTimeout(() => process.exit(code), 50);
 }

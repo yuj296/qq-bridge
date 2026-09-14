@@ -8,7 +8,7 @@
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
-import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
+import { NodeApiClient, unwrap, createTurnCollector, exitCleanly } from './dsh-client.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -26,6 +26,8 @@ async function main() {
   fs.mkdirSync(cwd, { recursive: true });
   const created = unwrap(await api.sessions.create({ cwd }), 'session.create');
   const sessionId = created.sessionId;
+  // DSH 0.1.2 没有全局事件流：必须显式登记要收事件的会话。
+  api.trackSession(sessionId);
   console.log('✅ 测试会话已创建:', sessionId);
 
   // 先订阅事件流（在 prompt 之前），再注入消息。
@@ -68,10 +70,13 @@ async function main() {
   console.log('🤖 agent 回复:');
   console.log(ended.text || '（无文本）');
   console.log('🎉 自测通过 —— DSH 侧链路可用');
-  process.exit(0);
+  // 收尾：归档测试会话并拆掉事件流 WebSocket（否则退出时会撞 libuv 断言）。
+  try { await api.workspace.archiveSession({ sessionId }); } catch {}
+  api.close();
+  exitCleanly(0);
 }
 
 main().catch((error) => {
   console.error('❌ 自测失败:', error?.message ?? error);
-  process.exit(1);
+  exitCleanly(1);
 });
