@@ -53,6 +53,7 @@ QQ 消息 → SnowLuma(OneBot v11) → 本桥接进程 → DSH 会话 → agent 
 | `tools/dsh-qq-bot.ps1` | 守护脚本（自启/自愈） | 改运维策略时 |
 | `scripts/setup-dsh.mjs` | DSH 端安装 | 安装流程变更时 |
 | `scripts/dsh-status.mjs` | 状态总览（**排查第一步**） | — |
+| `scripts/publish-fork.mjs` | **不依赖 git push** 的发布工具（走 GitHub Git Data API，只传变更文件） | 往 fork 推改动时 |
 | `PORTING-DSH-0.1.2.md` | 移植记录（协议差异、缺陷复盘、实测证据） | 每次实质改动后 |
 
 **关键认知**：`bridge.js` 虽然大，但**业务逻辑与 DSH 协议是解耦的**。
