@@ -51,6 +51,9 @@ QQ 私聊消息 → SnowLuma(OneBot v11) → 本桥接进程 → DSH 会话 → 
 | 路径 | 职责 | 什么时候改它 |
 |---|---|---|
 | `src/bridge.js` | **主程序**（~8.2k 行）。QQ 私聊事件处理、会话映射、模式逻辑、控制台 HTTP、social/reserved2 仿真 | 业务逻辑 |
+| `package.json` | **插件包清单**：`dsh.bundle.patch` → 根 `cordis.patch.yml`，`main` → `lib/index.js`。这三个是「本仓库能被当成 DSH 插件包/被插件市场认成已安装插件」的依据 | 改包名/入口/子包导出时 |
+| `cordis.patch.yml`（仓库根） | **包自带的 bundle patch**：插入宿主行 + 两个 UI 插件行。**MCP 三行不在这里**（需要机器相关的 node 绝对路径），仍由 `scripts/setup-dsh.mjs` 写进 profile | 加/改包内插件行时 |
+| `lib/index.js` | bundle 宿主入口（零依赖、绝不抛异常；只在启动时检查 `config.json` 并给提示） | 需要 bundle 级的宿主逻辑时 |
 | `src/settings-merge.js` | **设置页 → cfg 的合并规则**（纯函数：只覆盖 user 层、撤销时回磁盘值） | 改优先级/覆盖规则时 |
 | `src/dsh-client.js` | **DSH 0.1.2 客户端**。鉴权、端点调用、事件流多路复用、提问/审批双向翻译 | DSH 协议变更时 |
 | `src/dsh-client.0.1.1.js.bak` | 上游原文件（对照用，**不要改动、不要删**） | 永不 |
@@ -380,6 +383,11 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
 - **不要**把 `qq-mode-console` 改成往 profile 的 `package.json` 写 `link:` 依赖 +
   `dsh.profile.bundles` —— 在 DSH Desktop 上会**弄坏 DSH 启动**（详见 §6 of PORTING 文档）。
   正确做法是挂在用户 patch 层的 `file://` 条目上。
+  **边界说准**：坏的只是「`link:` 依赖 **加** `bundles` 条目」这个组合（bundle 解析不到会
+  `cannot resolve profile bundle`）。只在 profile 的 `dependencies` 里放一行
+  `"qq-bridge": "link:.dev-links/qq-bridge"`（**不进 bundles**）是安全的：插件仍由
+  patch 层的 `file://` 行挂载，运行行为不变 —— 目前这么做的唯一目的，是让 DSH 插件市场
+  的「已安装」列表能认出它（市场只读 profile 的 `dependencies`）。见 `INSTALL.md` §8.1。
 - **不要**为了「兼容」去改 `src/dsh-client.0.1.1.js.bak`。
 - **不要**把 `ownerQQ` 填成机器人号。
 - **不要**在发给管理员的审批里做敏感信息脱敏（会把目标路径藏掉，等于让用户闭眼批权限）；

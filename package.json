@@ -4,6 +4,22 @@
   "private": true,
   "description": "Bridge between SnowLuma (OneBot v11 / QQ) and DeepSeek Harness Web API: QQ messages become DSH agent prompts, agent replies go back to QQ.",
   "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./plugins/qq-mode-console": "./plugins/qq-mode-console/lib/index.js",
+    "./plugins/qq-wake": "./plugins/qq-wake/lib/index.js",
+    "./*": "./*"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "engines": {
     "node": ">=22.13.0"
   },

@@ -240,6 +240,32 @@ node scripts/test-wake.mjs --no-send    # 冷启动链路自测（不发 QQ 消�
 
 ---
 
+### 8.1 在插件市场里显示为「已安装」
+
+DSH 的插件市场（第三方插件 `dshmarket`）判定「已安装」的依据是 **profile 的 `package.json` 里有没有这个依赖**，
+和它是不是通过市场装的无关。本仓库已经是一个标准 DSH 插件包
+（`package.json` 声明 `dsh.bundle.patch` → 根目录 `cordis.patch.yml` → 宿主入口 `lib/index.js`），
+所以把它作为本地包登记进 profile，市场就会把它列进「已安装」并显示为 *live*（实测）：
+
+```powershell
+# 1) profile 依赖里加一行本地链接（pnpm 只建符号链接，不会去仓库拉取、不跑构建脚本）
+#    注意 link: 必须同盘相对路径，所以先在 profile 里建一个指向本仓库的 junction
+$WEB = "$env:APPDATA\dsh-desktop\harness\profiles\web"
+New-Item -ItemType Junction -Path "$WEB\.dev-links\qq-bridge" -Target "D:\dk\qq-bridge"
+New-Item -ItemType Junction -Path "$WEB\node_modules\qq-bridge" -Target "D:\dk\qq-bridge"
+# 然后在 $WEB\package.json 的 dependencies 里加： "qq-bridge": "link:.dev-links/qq-bridge"
+```
+
+**刻意不做的事**：不把 `qq-bridge` 加进 `dsh.profile.bundles`。
+插件仍由 profile 的 `cordis.patch.yml`（`setup-dsh.mjs` 写的 `file://` 行）挂载，运行行为一个字都不变；
+加进 `bundles` 会变成重复挂载，而且必须重启 DSH 才生效。
+
+**回滚**：删掉 `package.json` 里那一行依赖 + 两个 junction 即可（`setup-dsh.mjs` 每次也会自动备份 profile 的 `package.json`）。
+
+> ⚠️ 这只让**本机市场**把它当成已安装插件。想在市场的**目录**里搜到它（对所有人可见），
+> 需要往第三方精选列表 [`awesome-dsh-plugin`](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)
+> 提一个 `data/plugins/<owner>__<repo>.yml` 的 PR（那个列表是市场目录的唯一来源，市场只允许安装列表内的来源）。
+
 ## 9. 故障速查
 
 | 症状 | 先看 | 多半是 |
