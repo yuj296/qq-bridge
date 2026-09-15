@@ -68,7 +68,7 @@ function readConsoleToken() {
   }
 }
 
-// 进程控制只允许在 closed-agent（仅管理员私聊）模式下使用，防止 chat/reserved 的 agent 被群友诱导启停 SnowLuma。
+// 进程控制只允许在 closed-agent（仅管理员私聊）模式下使用，防止 chat/reserved 的 agent 被对方诱导启停 SnowLuma。
 async function bridgeModeAllowsProcessControl() {
   try {
     const token = readConsoleToken();

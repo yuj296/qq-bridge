@@ -29,7 +29,7 @@ export function mdToPlain(md) {
   return s.trim();
 }
 
-/** 按 QQ 单条消息长度上限切分（群消息一般 ≤ 4500 字，留余量）。 */
+/** 按 QQ 单条消息长度上限切分（单条消息一般 ≤ 4500 字，留余量）。 */
 export function splitForQQ(text, max = 4000) {
   const safeMax = Number.isFinite(max) && max >= 1 ? Math.floor(max) : 4000;
   const parts = [];

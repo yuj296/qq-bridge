@@ -1,5 +1,10 @@
 # DSH 端安装说明（另一台设备）
 
+> ⚠️ **本仓库只服务「私聊」**：桥接只处理**主人（`ownerQQ`）↔ 机器人的私聊**，
+> 群聊能力已彻底移除 —— 没有群消息入口、没有群发送路由、没有群 MCP 工具、
+> 没有 `allow.groups` / `deny.groups`（**群消息会被直接忽略**）。
+> 护栏测试：`node scripts/test-no-group.mjs`。
+
 > ⚠️ **本仓库已移植到 DSH 0.1.2（gateway 协议）。** 0.1.1 的
 > `@deepseek-ai/dsh-host-apiproxy` 在 0.1.2-alpha.1 起被删除，安装流程与
 > `setup-dsh.mjs` 的挂载方式都已改变。**先读
@@ -15,9 +20,12 @@
 1. **克隆/获取仓库**：
 
    ```bash
-   git clone https://github.com/Derpyu520/qq-bridge.git
+   git clone https://github.com/yuj296/qq-bridge.git
    cd qq-bridge
    ```
+
+   > 上游原仓库是 `Derpyu520/qq-bridge`，但它**没有 DSH 0.1.2 适配、也还带着群聊能力**；
+   > 0.1.2 用户请用上面的 fork。**从零开始的完整安装说明见 [`INSTALL.md`](../INSTALL.md)**（更详细）。
 
 2. **安装依赖**：
 
@@ -39,8 +47,8 @@
 
    - `snowluma.wsUrl` / `httpUrl`（例如 `ws://127.0.0.1:3001` / `http://127.0.0.1:3000`，分别对应 OneBot WebSocket 与 HTTP API 端口）
    - `snowluma.accessToken`
-   - `ownerQQ`
-   - `allow.private` / `allow.groups`
+   - `ownerQQ`（主人**本人**的 QQ 号，不是机器人号）
+   - `allow.private`（**私聊**白名单；群白名单字段 `allow.groups` 已删除，填了也无效）
 
 4. **运行 DSH 端安装脚本**：
 
@@ -94,6 +102,7 @@
    ```bash
    node scripts/dsh-status.mjs          # preset / 命名空间 / 插件清单
    node scripts/test-preset-012.mjs     # preset 能否真实建会话并跑完一回合
+   node scripts/test-no-group.mjs       # 群聊确实已被移除、私聊不受影响（起隔离实例 + 假 OneBot）
    ```
 
 ## 验证是否装好
@@ -102,7 +111,7 @@
 2. **新建会话时**：agent preset 列表中应能看到：
    - `QQ 聊天角色`（`qq-chat`）
    - `QQ 聊天角色（二代仿真）`（`qq-chat-v2`）
-3. **工具列表**：QQ 会话中应能看到 `mcp__snowluma__*`、`mcp__snowluma-host__*`、`mcp__web-search-safe__*` 等工具；不应看到 `dev_*` 等开发工具。
+3. **工具列表**：QQ 会话中应能看到 `mcp__snowluma__*`、`mcp__snowluma-host__*`、`mcp__web-search-safe__*` 等工具（`mcp__snowluma__*` 共 30 个，全是私聊语义，**不应出现任何群工具**）；不应看到 `dev_*` 等开发工具。
 
 以上三条都可以用 `node scripts/dsh-status.mjs` 一次性核对
 （它会打印 preset 名单、设置命名空间、工作区和插件清单）。

@@ -297,9 +297,6 @@
       <div class="meta" id="socialStatus">加载中…</div>
 
       <div class="row" style="margin-top:10px">
-        <label style="flex:1">普通消息触发概率（观望期）</label><input type="number" id="sTrigger" step="0.05" min="0" max="1" style="width:80px">
-      </div>
-      <div class="row">
         <label style="flex:1">活跃检测间隔（秒）</label>
         <input type="number" id="sCheckMin" min="5" style="width:70px"> ~
         <input type="number" id="sCheckMax" min="5" style="width:70px">
@@ -310,18 +307,7 @@
         <input type="number" id="sActiveDelayMax" min="0" style="width:70px">
       </div>
       <div class="divider"></div>
-      <div class="meta" style="margin-bottom:6px">群聊活跃超时主动退出</div>
-      <div class="row">
-        <label style="flex:1">启用</label><input type="checkbox" id="sActiveDurationEnabled" style="width:auto">
-      </div>
-      <div class="row">
-        <label style="flex:1">活跃最长持续时间（分）</label>
-        <input type="number" id="sActiveDurationMin" min="1" style="width:70px"> ~
-        <input type="number" id="sActiveDurationMax" min="1" style="width:70px">
-      </div>
-      <div class="meta">从进入群聊活跃那一刻起随机取一个时长；到点后即使群里还在聊，也会提示 AI 说一句收尾话并回到观望。私聊不自动退场。</div>
-
-      <div class="row">
+      <div class="row" style="margin-top:10px">
         <label style="flex:1">冷场窗口（分）</label><input type="number" id="sIdleWindow" min="1" style="width:80px">
       </div>
       <div class="row">
@@ -329,9 +315,6 @@
       </div>
       <div class="row">
         <label style="flex:1">试探等待窗口（分）</label><input type="number" id="sIdleWait" min="1" style="width:80px">
-      </div>
-      <div class="row">
-        <label style="flex:1">普通消息沉默概率</label><input type="number" id="sSkipProb" step="0.05" min="0" max="1" style="width:80px">
       </div>
       <div class="row">
         <label style="flex:1">抬杠时退让概率</label><input type="number" id="sSurrenderProb" step="0.05" min="0" max="1" style="width:80px">
@@ -362,26 +345,6 @@
         <input type="number" id="sLongGapMin" min="0" style="width:70px"> ~
         <input type="number" id="sLongGapMax" min="0" style="width:70px">
       </div>
-      <label>必回关键词（逗号分隔）</label>
-      <input type="text" id="sKeywords" placeholder="deepseek, 在吗">
-
-      <div class="divider"></div>
-      <div class="meta" style="margin-bottom:6px">主动开话题（观望期第三种触发）</div>
-      <div class="row">
-        <label style="flex:1">启用主动开话题</label><input type="checkbox" id="sProactiveEnabled" style="width:auto">
-      </div>
-      <div class="row">
-        <label style="flex:1">群安静多久判定（分）</label><input type="number" id="sProactiveIdle" min="1" style="width:80px">
-      </div>
-      <div class="row">
-        <label style="flex:1">判定间隔（分）</label>
-        <input type="number" id="sProactiveCheckMin" min="1" style="width:70px"> ~
-        <input type="number" id="sProactiveCheckMax" min="1" style="width:70px">
-      </div>
-      <div class="row">
-        <label style="flex:1">判定成功概率</label><input type="number" id="sProactiveProb" step="0.05" min="0" max="1" style="width:80px">
-      </div>
-
       <div class="row" style="margin-top:10px">
         <button id="socialSave">保存社交配置</button>
         <button id="socialFlush">立刻投喂摘要</button>
@@ -392,7 +355,7 @@
         <button id="sStateActive" class="small">设为活跃</button>
         <button id="sStateIdle" class="small">设为观望</button>
       </div>
-      <div class="meta">一代仿真模式状态机：观望期按“明确点名 / 小概率”触发进入活跃；活跃期每 10~20 秒批量查看新消息并回应；群聊活跃超过随机上限会主动提示 AI 收尾退场；冷场后大概率回观望、小概率让 AI 试探一句。可手动强制切换状态。</div>
+      <div class="meta">一代仿真模式状态机：私聊里对方每发一条消息都直接进入活跃并即时回应；冷场超过设定窗口后大概率回观望、小概率让 AI 试探一句，试探仍无回应则回观望。可手动强制切换状态。</div>
     </section>
 
     <!-- ============ 07 二代仿真模式（reserved2）控制台 ============ -->
@@ -423,22 +386,19 @@
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getUnread"> <span><b>qq_get_unread_messages</b><span class="meta">查看未读消息，不自动标记已读</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getRecent"> <span><b>qq_get_recent_messages</b><span class="meta">查看最近消息，支持 offset 扩大范围</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="socialState"> <span><b>qq_social_state</b><span class="meta">查看当前 WakeConfig、未读数、上次唤醒原因等</span></span></label>
-        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="sendGroup"> <span><b>qq_send_group_message</b><span class="meta">向指定群发送一条纯文本消息</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="sendPrivate"> <span><b>qq_send_private_message</b><span class="meta">向指定好友发送一条纯文本消息</span></span></label>
-        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="reply"> <span><b>qq_reply</b><span class="meta">引用/回复某条群消息并发送文本</span></span></label>
-        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="sendBurst"> <span><b>qq_send_burst</b><span class="meta">按数组分多条发送，桥接自动加真人化间隔</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="reply"> <span><b>qq_reply</b><span class="meta">私聊引用/回复某条消息并发送文本</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="sendMessage"> <span><b>qq_send_message</b><span class="meta">统一发送：一条/多条/引用/自定义或按字数计算间隔</span></span></label>
-        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="sendPoke"> <span><b>qq_send_poke</b><span class="meta">发送 QQ 拍一拍（群聊传 targetUserId，私聊可省）</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="sendPoke"> <span><b>qq_send_poke</b><span class="meta">发送 QQ 拍一拍（私聊，目标就是当前对话的对方）</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="waitMessages"> <span><b>qq_wait_for_messages</b><span class="meta">短暂等待新消息，有新消息立即返回或超时返回</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="feedback"> <span><b>qq_report_feedback</b><span class="meta">向控制台反馈 AI 遇到的问题/困惑</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getMyRecent"> <span><b>qq_get_my_recent_messages</b><span class="meta">查看自己最近发过的消息，避免重复</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getMessageDetail"> <span><b>qq_get_message_detail</b><span class="meta">按 message_id 查看单条消息完整内容</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getImages"> <span><b>qq_get_message_images</b><span class="meta">查看消息中的图片/表情内容</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getForwardMsg"> <span><b>qq_get_forward_msg</b><span class="meta">查看当前会话收到的合并转发消息内容</span></span></label>
-        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getActiveMembers"> <span><b>qq_get_active_members</b><span class="meta">查看最近活跃成员列表</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="setWakeConfig"> <span><b>qq_set_wake_config</b><span class="meta">设置唤醒/潜水条件：无限期、有限时间、@/名字/关键词/概率等</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="markRead"> <span><b>qq_mark_read</b><span class="meta">标记当前未读为已读（看过但决定不回复）</span></span></label>
-        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="memory"> <span><b>qq_memory_append / qq_memory_query</b><span class="meta">轻量记忆：话题/想说的话/群友印象</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="memory"> <span><b>qq_memory_append / qq_memory_query</b><span class="meta">轻量记忆：话题/想说的话/对对方的印象</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="slangQuery"> <span><b>qq_slang_query</b><span class="meta">查询已确认黑话/梗/网络表达</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="slangSubmit"> <span><b>qq_slang_submit</b><span class="meta">AI 提交陌生词/黑话给管理员筛选</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="listStickers"> <span><b>qq_list_stickers</b><span class="meta">查看/搜索 QQ 收藏表情（含备注和本地笔记）</span></span></label>
@@ -449,7 +409,7 @@
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="stickerNote"> <span><b>qq_sticker_note</b><span class="meta">给表情记录本地含义/标签/用法</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="setStickerRemark"> <span><b>qq_set_sticker_remark</b><span class="meta">修改 QQ 官方表情备注（默认禁用，慎用）</span></span></label>
       </div>
-      <div class="meta" style="margin-top:6px">二代黑话学习：AI 可用 <code>qq_slang_submit</code> 提交陌生词，也可由桥接自动提取；管理员在下方「08 群聊黑话 / 网络用语库」筛选确认后，词条会自动写入黑话提示词并注入 <code>qq_get_prompt</code> 与后续唤醒。</div>
+      <div class="meta" style="margin-top:6px">二代黑话学习：AI 可用 <code>qq_slang_submit</code> 提交陌生词，也可由桥接自动提取；管理员在下方「08 聊天黑话 / 网络用语库」筛选确认后，词条会自动写入黑话提示词并注入 <code>qq_get_prompt</code> 与后续唤醒。</div>
 
       <div class="divider"></div>
       <div class="meta" style="margin-bottom:6px">唤醒推荐值（仅参考，AI 可不遵守）</div>
@@ -550,7 +510,7 @@
       </div>
 
       <div class="divider"></div>
-      <div class="meta" style="margin-bottom:6px">主动机会参数（proactive：群安静时 AI 主动冒泡）</div>
+      <div class="meta" style="margin-bottom:6px">主动机会参数（proactive：对方安静时 AI 主动冒泡）</div>
       <div class="row">
         <label style="flex:1">启用主动机会</label><input type="checkbox" id="v2ProactiveEnabled" style="width:auto">
         <label style="flex:1">检查间隔（分）</label>
@@ -617,7 +577,7 @@
       <div class="divider"></div>
       <div class="meta" style="margin-bottom:6px">轻量记忆（activeTopics / pendingThoughts / memberImpressions）</div>
       <div class="row">
-        <input type="text" id="v2MemoryKey" placeholder="group:123456789" style="flex:1">
+        <input type="text" id="v2MemoryKey" placeholder="private:123456789" style="flex:1">
         <button id="v2MemoryLoad" class="small">加载记忆</button>
         <button id="v2MemoryClearAll" class="small danger">清空全部</button>
         <span class="meta" id="v2MemoryMsg"></span>
@@ -627,7 +587,7 @@
       <div class="divider"></div>
       <div class="meta" style="margin-bottom:6px">唤醒状态（AI 当前设置的下一次唤醒条件/倒计时）</div>
       <div class="row">
-        <input type="text" id="v2WakeKey" placeholder="group:123456789" style="flex:1">
+        <input type="text" id="v2WakeKey" placeholder="private:123456789" style="flex:1">
         <button id="v2WakeStatusLoad" class="small">查看唤醒状态</button>
         <span class="meta" id="v2WakeStatusMsg"></span>
       </div>
@@ -642,14 +602,14 @@
       <div class="divider"></div>
       <div class="meta" style="margin-bottom:6px">白名单会话快速选择</div>
       <div class="row">
-        <select id="v2SessionSelect" style="flex:1"><option value="">选择白名单群/私聊…</option></select>
+        <select id="v2SessionSelect" style="flex:1"><option value="">选择白名单私聊…</option></select>
         <button id="v2SessionRefresh" class="small">刷新</button>
       </div>
 
       <div class="divider"></div>
       <div class="meta" style="margin-bottom:6px">会话状态查看</div>
       <div class="row">
-        <input type="text" id="v2StateKey" placeholder="group:123456789" style="flex:1">
+        <input type="text" id="v2StateKey" placeholder="private:123456789" style="flex:1">
         <button id="v2StateView" class="small">查看</button>
         <button id="v2ForceWake" class="small">立即唤醒</button>
         <button id="v2StatesList" class="small">列出全部会话状态</button>
@@ -660,8 +620,8 @@
 
     <!-- ============ 08 黑话库 ============ -->
     <section class="card span-all">
-      <h2><span class="sec-no">08</span>群聊黑话 / 网络用语库</h2>
-      <div class="meta">DSH 会从群聊中自动提取疑似黑话候选；二代仿真模式下 AI 也可用 <code>qq_slang_submit</code> 主动提交陌生词。候选可批量送 DSH 深度联网研究，研究结果回到控制台由你删改修正后转正；确认后的词条会写入“黑话提示词”，注入一代/二代 AI 的聊天上下文，成为 AI 可查询和使用的记忆。</div>
+      <h2><span class="sec-no">08</span>聊天黑话 / 网络用语库</h2>
+      <div class="meta">DSH 会从聊天记录中自动提取疑似黑话候选；二代仿真模式下 AI 也可用 <code>qq_slang_submit</code> 主动提交陌生词。候选可批量送 DSH 深度联网研究，研究结果回到控制台由你删改修正后转正；确认后的词条会写入“黑话提示词”，注入一代/二代 AI 的聊天上下文，成为 AI 可查询和使用的记忆。</div>
 
       <div class="slang-tabs">
         <button class="slang-tab active" data-slang-tab="candidate">候选词</button>
@@ -806,30 +766,22 @@
       <table>
         <tr><th>工具</th><th>说明</th></tr>
         <tr><td>qq_status</td><td>登录状态（只读）</td></tr>
-        <tr><td>qq_list_groups</td><td>群列表（只返回白名单群）</td></tr>
-        <tr><td>qq_get_group_members</td><td>群成员（只读，群号必须白名单）</td></tr>
-        <tr><td>qq_get_group_history</td><td>群历史（只读，含 message_id，可作引用目标）</td></tr>
-        <tr><td>qq_send_group_message</td><td>发群消息；可选 <code>replyToMessageId</code> 引用/回复</td></tr>
-        <tr><td>qq_reply</td><td>专用“引用/回复”：在群里引用某条消息并发送文本</td></tr>
+        <tr><td>qq_reply</td><td>私聊引用/回复某条消息并发送文本</td></tr>
         <tr><td>qq_send_private_message</td><td>发私聊；可选 <code>replyToMessageId</code> 引用/回复</td></tr>
         <tr><td>qq_slang_query</td><td>查询已确认黑话/梗/网络表达（只读）</td></tr>
         <tr><td>qq_slang_submit</td><td>AI 提交陌生词/黑话给管理员筛选</td></tr>
       </table>
-      <div class="meta" style="margin-top:10px">二代仿真模式工具：qq_get_prompt / qq_get_unread_messages / qq_get_recent_messages / qq_social_state / qq_send_burst / qq_send_message / qq_wait_for_messages / qq_set_wake_config / qq_mark_read / qq_memory_* / qq_slang_query / qq_slang_submit 等。</div>
+      <div class="meta" style="margin-top:10px">二代仿真模式工具：qq_get_prompt / qq_get_unread_messages / qq_get_recent_messages / qq_social_state / qq_send_message / qq_wait_for_messages / qq_set_wake_config / qq_mark_read / qq_memory_* / qq_slang_query / qq_slang_submit 等。</div>
     </section>
 
     <!-- ============ 10 白名单 / 管理员 ============ -->
     <section class="card">
       <h2><span class="sec-no">10</span>白名单 / 管理员</h2>
-      <label>允许的群号（逗号分隔）</label>
-      <input type="text" id="wlGroups" placeholder="123456789, 123456">
       <label>允许的私聊 QQ（逗号分隔）</label>
       <input type="text" id="wlPrivate" placeholder="123456789">
       <label>管理员 QQ（ownerQQ，最高权限）</label>
       <input type="text" id="ownerQQ" placeholder="123456789">
       <div class="meta">管理员是唯一可执行管理命令/审批/closed-agent 的 QQ；可留空清除（清除后无管理员，fail-closed）。</div>
-      <label>拒绝的群号（黑名单，逗号分隔）</label>
-      <input type="text" id="dnGroups" placeholder="">
       <label>拒绝的私聊 QQ（黑名单，逗号分隔）</label>
       <input type="text" id="dnPrivate" placeholder="">
       <div class="row" style="margin-top:10px">
@@ -845,19 +797,19 @@
         <button id="silentOn">开启静默</button>
         <button id="silentOff">恢复正常</button>
       </div>
-      <div class="meta">静默时群友消息不投递 agent，仅管理员可对话。</div>
+      <div class="meta">静默时对方消息不投递 agent，仅管理员可对话。</div>
     </section>
 
     <section class="card">
       <h2><span class="sec-no">12</span>安全拦截通知</h2>
       <div class="row">
-        <label style="flex:1">拦截时在群里发提示</label><input type="checkbox" id="secInterceptNotify" style="width:auto">
+        <label style="flex:1">拦截时在私聊里发提示</label><input type="checkbox" id="secInterceptNotify" style="width:auto">
       </div>
       <div class="row" style="margin-top:8px">
         <button id="secSave" class="small">保存安全设置</button>
         <span class="meta" id="secMsg"></span>
       </div>
-      <div class="meta">开启：回复被安全拦截时会在群里提示；关闭：直接沉默，只在日志/活动记录里留下记录。</div>
+      <div class="meta">开启：回复被安全拦截时会在私聊里提示；关闭：直接沉默，只在日志/活动记录里留下记录。</div>
     </section>
 
     <!-- ============ 12b 控制台访问令牌 ============ -->
@@ -876,11 +828,7 @@
     <section class="card">
       <h2><span class="sec-no">13</span>测试发送</h2>
       <div class="row">
-        <select id="tsKind" style="width:100px">
-          <option value="group">群</option>
-          <option value="private">私聊</option>
-        </select>
-        <input type="text" id="tsId" placeholder="群号 / QQ 号" style="width:140px">
+        <input type="text" id="tsId" placeholder="QQ 号" style="width:140px">
       </div>
       <label>消息内容</label>
       <textarea id="tsMsg" placeholder="这是一条测试消息"></textarea>
@@ -907,16 +855,12 @@
     <!-- ============ 15 后台控制端引导 ============ -->
     <section class="card span-all">
       <h2><span class="sec-no">15</span>后台控制端引导</h2>
-      <div class="meta">直接向指定 QQ 会话的 DSH agent 投递一条“后台控制端提醒”，用于给 AI 引导/提醒；该消息不是群友消息。二代模式（reserved2）下会自动附带会话令牌和二代工具协议说明，AI 的文本输出不会自动转发，发言需通过发送工具。</div>
+      <div class="meta">直接向指定 QQ 私聊会话的 DSH agent 投递一条“后台控制端提醒”，用于给 AI 引导/提醒；该消息不是对方消息。二代模式（reserved2）下会自动附带会话令牌和二代工具协议说明，AI 的文本输出不会自动转发，发言需通过发送工具。</div>
       <div class="row" style="margin-top:10px">
-        <select id="aiNotifyKind" style="width:110px">
-          <option value="group">群</option>
-          <option value="private">私聊</option>
-        </select>
-        <input type="text" id="aiNotifyId" placeholder="群号 / QQ 号" style="width:180px">
+        <input type="text" id="aiNotifyId" placeholder="QQ 号" style="width:180px">
       </div>
       <label>提醒内容（发给 DSH agent 的引导/提醒）</label>
-      <textarea id="aiNotifyMessage" placeholder="例如：接下来群里聊到某个话题时，你可以更主动一点；或：先潜水，等我叫你。"></textarea>
+      <textarea id="aiNotifyMessage" placeholder="例如：接下来对方聊到某个话题时，你可以更主动一点；或：先潜水，等我叫你。"></textarea>
       <div class="row" style="margin-top:8px">
         <button id="aiNotifySend">发送到 DSH</button>
         <span class="meta" id="aiNotifyMsg"></span>
@@ -965,7 +909,7 @@ async function refresh() {
     document.getElementById('roleText').textContent = s.role || '无';
     document.getElementById('roleModeText').textContent = s.roleMode === 'silent' ? '静默' : '正常';
     const modeLabel = s.mode === 'reserved' ? '一代仿真模式' : s.mode === 'reserved2' ? '二代仿真模式' : s.mode === 'closed-agent' ? '封闭 Agent' : '聊天模式';
-    document.getElementById('statusText').textContent = 'DSH: ' + (s.dshReady ? '在线' : '离线') + ' ｜ 模式: ' + modeLabel + ' ｜ 管理员: ' + (s.ownerQQ || '未设置') + ' ｜ 群白名单: ' + (s.allowGroups.join(', ') || '无') + ' ｜ 私聊白名单: ' + (s.allowPrivate.join(', ') || '无');
+    document.getElementById('statusText').textContent = 'DSH: ' + (s.dshReady ? '在线' : '离线') + ' ｜ 模式: ' + modeLabel + ' ｜ 管理员: ' + (s.ownerQQ || '未设置') + ' ｜ 私聊白名单: ' + (s.allowPrivate.join(', ') || '无');
     document.getElementById('activity').textContent = s.activity || '（空）';
     const presetSel = document.getElementById('closedPreset');
     if (presetSel && document.activeElement !== presetSel) presetSel.value = s.closedAgentPreset || '';
@@ -1012,10 +956,8 @@ async function refreshRoles() {
 async function refreshWhitelist() {
   try {
     const w = await api('/api/whitelist');
-    document.getElementById('wlGroups').value = (w.allow.groups || []).join(', ');
     document.getElementById('wlPrivate').value = (w.allow.private || []).join(', ');
     document.getElementById('ownerQQ').value = w.ownerQQ != null ? String(w.ownerQQ) : '';
-    document.getElementById('dnGroups').value = (w.deny.groups || []).join(', ');
     document.getElementById('dnPrivate').value = (w.deny.private || []).join(', ');
   } catch {}
 }
@@ -1027,8 +969,7 @@ async function refreshSessions() {
     if (!s.sessions.length) { box.innerHTML = '<span class="meta">暂无会话</span>'; return; }
     let html = '<table><tr><th>QQ 会话</th><th>DSH 会话 ID</th><th>类型</th><th></th></tr>';
     for (const x of s.sessions) {
-      const isP = x.key.startsWith('private:');
-      const type = isP ? '<span class="pill b">私聊</span>' : '<span class="pill g">群</span>';
+      const type = '<span class="pill b">私聊</span>';
       const ownerTag = x.owner ? ' <span class="pill r">管理员</span>' : '';
       html += `<tr><td>${esc(x.key)}${ownerTag}</td><td><code>${esc(x.sessionId)}</code></td><td>${type}</td><td><button class="small" data-reset-key="${esc(x.key)}">清除上下文</button></td></tr>`;
     }
@@ -1087,8 +1028,8 @@ document.getElementById('silentOff').addEventListener('click', async () => { awa
 document.getElementById('wlSave').addEventListener('click', async () => {
   const parse = (s) => s.split(/[,，\s]+/).map(x => x.trim()).filter(Boolean).map(Number).filter(Number.isFinite);
   const r = await api('/api/whitelist', 'POST', {
-    allow: { private: parse(document.getElementById('wlPrivate').value), groups: parse(document.getElementById('wlGroups').value) },
-    deny: { private: parse(document.getElementById('dnPrivate').value), groups: parse(document.getElementById('dnGroups').value) },
+    allow: { private: parse(document.getElementById('wlPrivate').value) },
+    deny: { private: parse(document.getElementById('dnPrivate').value) },
     ownerQQ: document.getElementById('ownerQQ').value.trim()
   });
   if (r.ok) { refreshWhitelist(); refresh(); alert('白名单已保存并生效'); }
@@ -1096,7 +1037,7 @@ document.getElementById('wlSave').addEventListener('click', async () => {
 });
 document.getElementById('tsSend').addEventListener('click', async () => {
   const r = await api('/api/test-send', 'POST', {
-    kind: document.getElementById('tsKind').value,
+    kind: 'private',
     id: document.getElementById('tsId').value.trim(),
     message: document.getElementById('tsMsg').value
   });
@@ -1116,11 +1057,10 @@ document.getElementById('clearWsBtn').addEventListener('click', async () => {
   refreshSessions(); refresh();
 });
 document.getElementById('aiNotifySend').addEventListener('click', async () => {
-  const kind = document.getElementById('aiNotifyKind').value;
   const id = document.getElementById('aiNotifyId').value.trim();
   const message = document.getElementById('aiNotifyMessage').value.trim();
-  if (!id || !message) { alert('请填写群号/QQ 号和提醒内容'); return; }
-  const r = await api('/api/console/notify-ai', 'POST', { key: kind + ':' + id, message });
+  if (!id || !message) { alert('请填写 QQ 号和提醒内容'); return; }
+  const r = await api('/api/console/notify-ai', 'POST', { key: 'private:' + id, message });
   const msg = document.getElementById('aiNotifyMsg');
   msg.textContent = r.ok ? ('✅ 已投递到 DSH：' + r.sessionId) : ('❌ ' + (r.error || '失败'));
   msg.className = r.ok ? 'meta ok' : 'meta err';
@@ -1445,7 +1385,7 @@ function renderV2Memory(data) {
     html += `<div style="margin:4px 0">💭 ${esc(String(t?.text || ''))}${t?.motivation ? `（${esc(String(t.motivation))}）` : ''} <button class="small" data-action="edit" data-cat="pendingThought" data-content="${esc(String(t?.text || ''))}">编辑</button> <button class="small" data-action="remove" data-cat="pendingThought" data-content="${esc(String(t?.text || ''))}">删除</button></div>`;
   }
   html += '</div>';
-  html += '<div class="memory-section"><b>对群友的印象</b> <button class="small" data-action="clear" data-cat="memberImpression">清空</button>';
+  html += '<div class="memory-section"><b>对对方的印象</b> <button class="small" data-action="clear" data-cat="memberImpression">清空</button>';
   const names = Object.keys(impressions);
   if (!names.length) html += '<div class="meta">（空）</div>';
   for (const name of names) {
@@ -1589,10 +1529,8 @@ async function loadV2SessionOptions() {
   const prev = sel.value;
   try {
     const r = await api('/api/status');
-    const groups = Array.isArray(r.allowGroups) ? r.allowGroups : [];
     const privates = Array.isArray(r.allowPrivate) ? r.allowPrivate : [];
-    const options = [{ value: '', label: '选择白名单群/私聊…' }];
-    for (const g of groups) options.push({ value: 'group:' + g, label: '群 ' + g });
+    const options = [{ value: '', label: '选择白名单私聊…' }];
     for (const p of privates) options.push({ value: 'private:' + p, label: '私聊 ' + p });
     sel.innerHTML = options.map((o) => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join('');
     if (prev && options.some((o) => o.value === prev)) sel.value = prev;
@@ -1681,18 +1619,13 @@ async function loadSocialForm() {
   try {
     const s = await api('/api/social');
     const c = s.config;
-    document.getElementById('sTrigger').value = c.triggerProbability;
     document.getElementById('sCheckMin').value = Math.round((c.activeCheckMinMs || 0) / 1000);
     document.getElementById('sCheckMax').value = Math.round((c.activeCheckMaxMs || 0) / 1000);
     document.getElementById('sActiveDelayMin').value = Math.round((c.activeReplyDelayMinMs || 0) / 1000);
     document.getElementById('sActiveDelayMax').value = Math.round((c.activeReplyDelayMaxMs || 0) / 1000);
-    document.getElementById('sActiveDurationEnabled').checked = c.activeDurationEnabled !== false;
-    document.getElementById('sActiveDurationMin').value = Math.round((c.activeDurationMinMs || 0) / 60000);
-    document.getElementById('sActiveDurationMax').value = Math.round((c.activeDurationMaxMs || 0) / 60000);
     document.getElementById('sIdleWindow').value = Math.round((c.idleWindowMs || 0) / 60000);
     document.getElementById('sIdleRetry').value = c.idleRetryProbability;
     document.getElementById('sIdleWait').value = Math.round((c.idleRetryWaitMs || 0) / 60000);
-    document.getElementById('sSkipProb').value = c.skipProbability ?? 0.15;
     document.getElementById('sSurrenderProb').value = c.surrenderProbability ?? 0.08;
     document.getElementById('sContextWindow').value = c.contextWindow;
     document.getElementById('sMaxChars').value = c.maxReplyChars ?? 500;
@@ -1702,12 +1635,6 @@ async function loadSocialForm() {
     document.getElementById('sLongGapProb').value = c.longGapProbability ?? 0.1;
     document.getElementById('sLongGapMin').value = c.longGapMinMs ?? 2500;
     document.getElementById('sLongGapMax').value = c.longGapMaxMs ?? 5000;
-    document.getElementById('sKeywords').value = (c.mustReplyKeywords || []).join(', ');
-    document.getElementById('sProactiveEnabled').checked = c.proactiveEnabled !== false;
-    document.getElementById('sProactiveIdle').value = Math.round((c.proactiveIdleThresholdMs || 0) / 60000);
-    document.getElementById('sProactiveCheckMin').value = Math.round((c.proactiveCheckMinMs || 0) / 60000);
-    document.getElementById('sProactiveCheckMax').value = Math.round((c.proactiveCheckMaxMs || 0) / 60000);
-    document.getElementById('sProactiveProb').value = c.proactiveProbability;
   } catch {}
 }
 
@@ -1730,7 +1657,7 @@ async function refreshSocialStatus() {
     }
     if (prevSel && [...sel.options].some(o => o.value === prevSel)) sel.value = prevSel;
     let html = '摘要缓冲: ' + esc(buff) + '<br>状态:';
-    if (!stateEntries.length) html += ' 暂无（发过消息的群会显示状态）';
+    if (!stateEntries.length) html += ' 暂无（发过消息的会话会显示状态）';
     for (const [k, v] of stateEntries) {
       html += ` <span class="${phaseClass[v.phase] || 'pill'}">${esc(k)} · ${phaseLabel[v.phase] || esc(v.phase)}</span>`;
     }
@@ -1741,18 +1668,13 @@ async function refreshSocialStatus() {
 document.getElementById('socialSave').addEventListener('click', async () => {
   const n = (id) => Number(document.getElementById(id).value);
   const r = await api('/api/social', 'POST', {
-    triggerProbability: Math.min(1, Math.max(0, n('sTrigger'))),
     activeCheckMinMs: Math.max(5, n('sCheckMin')) * 1000,
     activeCheckMaxMs: Math.max(5, n('sCheckMax')) * 1000,
     activeReplyDelayMinMs: Math.max(0, n('sActiveDelayMin')) * 1000,
     activeReplyDelayMaxMs: Math.max(0, n('sActiveDelayMax')) * 1000,
-    activeDurationEnabled: document.getElementById('sActiveDurationEnabled').checked,
-    activeDurationMinMs: Math.max(1, n('sActiveDurationMin')) * 60000,
-    activeDurationMaxMs: Math.max(1, n('sActiveDurationMax')) * 60000,
     idleWindowMs: Math.max(1, n('sIdleWindow')) * 60000,
     idleRetryProbability: Math.min(1, Math.max(0, n('sIdleRetry'))),
     idleRetryWaitMs: Math.max(1, n('sIdleWait')) * 60000,
-    skipProbability: Math.min(1, Math.max(0, n('sSkipProb'))),
     surrenderProbability: Math.min(1, Math.max(0, n('sSurrenderProb'))),
     contextWindow: Math.min(100, Math.max(1, n('sContextWindow'))),
     maxReplyChars: Math.max(1, n('sMaxChars')),
@@ -1761,13 +1683,7 @@ document.getElementById('socialSave').addEventListener('click', async () => {
     burstIntervalMaxMs: Math.max(0, n('sBurstIntervalMax')),
     longGapProbability: Math.min(1, Math.max(0, n('sLongGapProb'))),
     longGapMinMs: Math.max(0, n('sLongGapMin')),
-    longGapMaxMs: Math.max(0, n('sLongGapMax')),
-    mustReplyKeywords: document.getElementById('sKeywords').value.split(/[,，]/).map(x => x.trim()).filter(Boolean),
-    proactiveEnabled: document.getElementById('sProactiveEnabled').checked,
-    proactiveIdleThresholdMs: Math.max(1, n('sProactiveIdle')) * 60000,
-    proactiveCheckMinMs: Math.max(1, n('sProactiveCheckMin')) * 60000,
-    proactiveCheckMaxMs: Math.max(1, n('sProactiveCheckMax')) * 60000,
-    proactiveProbability: Math.min(1, Math.max(0, n('sProactiveProb')))
+    longGapMaxMs: Math.max(0, n('sLongGapMax'))
   });
   document.getElementById('socialMsg').textContent = r.ok ? '✅ 已保存' : ('❌ ' + (r.error || '失败'));
   document.getElementById('socialMsg').className = r.ok ? 'meta ok' : 'meta err';

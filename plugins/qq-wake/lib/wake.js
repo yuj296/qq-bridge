@@ -171,7 +171,7 @@ function spawnDetached(nodeExe, script, cwd, pidFile, log) {
 }
 
 /** 这个 pid 现在真的是 node 进程吗（Windows 上问 tasklist；防止 pid 复用误杀）。 */
-function isNodeProcess(pid) {
+function probeNodeProcess(pid) {
   try {
     const out = execFileSync('tasklist.exe', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
       windowsHide: true,
@@ -182,8 +182,62 @@ function isNodeProcess(pid) {
     try { text_ = new TextDecoder('gbk').decode(out); } catch { text_ = String(out); }
     return /node\.exe/i.test(text_);
   } catch {
-    return false;   // 问不出来就当作"不是"，宁可不杀
+    return null;   // 问不出来（tasklist 不可用/被沙箱拦）→ 未知，调用方自行决定保守方向
   }
+}
+function isNodeProcess(pid) {
+  return probeNodeProcess(pid) === true;   // 宁可不杀
+}
+
+/** 这个 pid 现在什么状态：'alive' | 'dead' | 'foreign'（存在但不属于我们，例如系统进程）。 */
+function pidState(pid) {
+  try {
+    process.kill(pid, 0);
+    return 'alive';
+  } catch (error) {
+    return error?.code === 'ESRCH' ? 'dead' : 'foreign';
+  }
+}
+
+/**
+ * 清掉「被复用的」桥接实例锁（state/bridge.lock）。
+ *
+ * 背景：桥接用 state/bridge.lock 里的 pid 做单实例判定，但它被硬杀（DSH 重启连带、
+ * 任务管理器结束进程）时来不及删锁；而 Windows 会把 pid 复用给别的进程 —— 实测旧 pid
+ * 1112 后来变成了系统进程 dwm，于是新桥接的存活检查失败（signal 0 报 EPERM）→ 打印
+ * 「已有实例在运行」并 exit 2 → 唤醒静默失败（日志里什么都没有）。
+ *
+ * 判定：锁里的 pid 现在「活着、而且确实是 node 进程」才认为真有一个实例在跑；
+ * 否则删锁（空文件/非法内容/进程不存在/pid 被别的程序复用 都算过期）。
+ *
+ * @returns {{cleared: boolean, pid: number, reason: string}}
+ */
+export function clearStaleLock(bridgeDir = BRIDGE_DIR) {
+  const lockFile = path.join(bridgeDir, 'state', 'bridge.lock');
+  if (!fs.existsSync(lockFile)) return { cleared: false, pid: 0, reason: '没有锁文件' };
+  const pid = readPidFile(lockFile);
+  if (!pid) return { cleared: false, pid: 0, reason: '锁文件为空或内容非法（桥接自己会清）' };
+
+  const state = pidState(pid);
+  if (state === 'alive') {
+    const isNode = probeNodeProcess(pid);
+    if (isNode === true) return { cleared: false, pid, reason: '疑为正在运行的桥接实例' };
+    // tasklist 问不出来（不可用/被拦）→ 无法确认，按「宁可不删」处理
+    if (isNode === null) return { cleared: false, pid, reason: '问不出该 pid 的进程类型，保守不动' };
+    // 明确不是 node：这个 pid 被别的程序复用了，锁是死的
+  }
+
+  const why = state === 'dead'
+    ? '该 pid 已不存在'
+    : state === 'foreign'
+      ? '该 pid 被系统/其它用户的进程占用（pid 复用）'
+      : '该 pid 已被非 node 进程复用';
+  try {
+    fs.unlinkSync(lockFile);
+  } catch (error) {
+    return { cleared: false, pid, reason: `删除失败：${error?.message ?? error}` };
+  }
+  return { cleared: true, pid, reason: why };
 }
 
 /**
@@ -357,6 +411,11 @@ async function ensureBridge(cfg, { bridgeDir, timeoutMs, log }) {
 
   const entry = path.join(bridgeDir, 'src', 'bridge.js');
   if (!fs.existsSync(entry)) return { ok: false, started: false, detail: `找不到 ${entry}` };
+
+  // 启动前先清掉「被复用的」实例锁：否则桥接会误判「已有实例在运行」并 exit 2，
+  // 唤醒就会静默失败（桥接那边一行日志都不会写）。
+  const lock = clearStaleLock(bridgeDir);
+  if (lock.cleared) log(`清掉过期的桥接实例锁（PID=${lock.pid}：${lock.reason}）`);
 
   const pidFile = path.join(bridgeDir, 'state', 'supervisor', 'bridge.pid');
   const pid = spawnDetached(resolveNodeExe(), entry, bridgeDir, pidFile, log);

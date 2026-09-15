@@ -1,8 +1,13 @@
 # qq-mode-console —— DSH 设置页的「QQ 机器人」分区
 
-把 qq-bridge 的 **整份 `config.json`**（156 项，机密除外）搬进 DSH 设置页 ——
+把 qq-bridge 的 **整份 `config.json`**（140 项，机密除外）搬进 DSH 设置页 ——
 **「通用设置」正下方**一个独立分区（`settings.section`，order=1），
 每项都带中文名和一段详细说明，点几下就能改，不用手编 JSON。
+
+> ⚠️ **字段表里已经没有任何群相关项**：`allow.groups` / `deny.groups`、群专属仿真参数
+> （触发概率、必答词、活跃时长、主动开话题、选择性沉默）与 3 个群工具开关
+> （`socialV2.tools.sendGroup` / `sendBurst` / `getActiveMembers`）都已随群聊能力一起删除
+> （16 个字段）。本插件服务的桥接**只处理「用户 ↔ 机器人」私聊**。
 
 ```
 DSH 设置页「QQ 机器人」分区（client，order=1）
@@ -36,17 +41,17 @@ DSH 的设置页**不会**自动把 settings 命名空间渲染成界面：
 排序：官方 `general`（通用设置）= order 0、`models` = 10、`plugins` = 15；
 本插件用 **order 1**，所以它紧跟在「通用设置」下面。
 
-## 分组（10 组，156 项）
+## 分组（10 组，140 项）
 
 | 分组 | 项数 | 说明 |
 |---|---|---|
-| 基本 | 10 | 运行模式、管理员 QQ、preset、控制台端口、超时… |
+| 基本 | 9 | 运行模式、管理员 QQ、preset、控制台端口、超时… |
 | 通知 | 6 | 任务完成通知的开关与阈值（默认只报跑够 5 分钟的） |
-| 白名单 / 黑名单 | 2 / 2 | 私聊、群的准入 |
+| 白名单 / 黑名单 | 2 / 1 | **私聊**准入（`allow.private` / `deny.private`）；群白/黑名单字段已删除 |
 | 安全 | 1 | 拦截时是否通知 |
 | 黑话学习 | 8 | 提取阈值、冷却、注入上限、自动深研 |
-| 一代仿真 social | 27 | 插话概率、必答词、主动找人、分条发送… |
-| 二代仿真 socialV2 | 91 | 潜水/唤醒、发送限流、**29 个工具逐个开关**、表情包、上下文… |
+| 一代仿真 social | 16 | 回复长度、上下文条数、活跃检查间隔、观望/重试、分条发送…（群相关项已删） |
+| 二代仿真 socialV2 | 88 | 潜水/唤醒、发送限流、**26 个工具逐个开关**、表情包、上下文、主动找人… |
 | 模型与 DSH 接线 | 4 | provider / model / 思考强度 / DSH 地址 |
 | SnowLuma 接线（高级） | 5 | wsUrl / httpUrl / 启动脚本 / 安装目录 / 进程控制 |
 
@@ -75,17 +80,18 @@ DSH 的设置页**不会**自动把 settings 命名空间渲染成界面：
 |---|---|
 | `snowluma.accessToken`、`consoleToken`、`dsh.token` | 机密。设置协议强制 `redactSecrets`，宿主读回来是空的 —— 放进设置页只会变成只写陷阱。它们只认 `config.json` |
 | `mode` | 不进 `base`：没在页面里选过，就沿用桥接控制台 / `state/mode.json`（老行为）；选过才覆盖 |
+| 所有群相关字段 | 桥接只做私聊，群字段（`allow.groups` / `deny.groups` / 群仿真参数 / 群工具开关）已从字段表删除，**不允许加回来** —— `scripts/test-qq-settings.mjs` 有专门的断言盯着 |
 
 ## 自测
 
 ```bash
-node scripts/test-qq-settings.mjs        # 字段表 ↔ schema ↔ config.json（覆盖率/重复/类型/说明长度）
+node scripts/test-qq-settings.mjs        # 字段表 ↔ schema ↔ config.json（覆盖率/重复/类型/说明长度/群字段不许回来）
 node scripts/test-qq-settings-page.mjs   # 页面：注册到哪个槽位、order、渲染结果、字段说明
 ```
 
 `test-qq-settings-page.mjs` 用真 schema + react-dom/server 把页面渲染成 HTML，验：
 注册进 `settings.section`、`id=qq-bot`、`order=1`、10 个分组都在、每组的"N 项"对得上、
-默认展开的分组行数 = 38、字段说明真的渲染出来了。
+默认展开的分组行数 = 36（140 项减去收起的 social 16 + socialV2 88）、字段说明真的渲染出来了。
 
 ## 坑
 

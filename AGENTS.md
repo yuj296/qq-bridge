@@ -12,15 +12,21 @@
 
 ## 0. 一句话
 
-把 QQ 消息接进 **DSH（DeepSeek Harness）** agent：
+把 QQ **私聊**消息接进 **DSH（DeepSeek Harness）** agent：
 
 ```
-QQ 消息 → SnowLuma(OneBot v11) → 本桥接进程 → DSH 会话 → agent 生成回复 → 回到 QQ
+QQ 私聊消息 → SnowLuma(OneBot v11) → 本桥接进程 → DSH 会话 → agent 生成回复 → 回到 QQ 私聊
 ```
+
+> ⚠️ **本仓库只服务「主人（`ownerQQ`）↔ 机器人的私聊」。群聊能力已被彻底移除：**
+> 不注册群消息入口、没有群发送路由、MCP 工具里没有群工具、配置里没有 `allow.groups`
+> / `deny.groups`。**群消息（`group_id` 非空的事件）会被直接忽略**，不进会话、不投喂
+> agent、也不回复。护栏测试：`node scripts/test-no-group.mjs`（§6）。
 
 **本仓库是「DSH 0.1.2 适配版」。** 上游原版基于 `@deepseek-ai/dsh-host-apiproxy`
 （DSH ≤ 0.1.1 的 HTTP API），该包在 **DSH 0.1.2-alpha.1 起被官方删除**，
-所以原版在 0.1.2 上**完全连不上**。移植细节见 `PORTING-DSH-0.1.2.md`。
+所以原版在 0.1.2 上**完全连不上**。移植细节见 `PORTING-DSH-0.1.2.md`
+（**该文档是历史记录**：其中「群」相关的描述是移植当时的状态，不是现在的行为）。
 
 ---
 
@@ -44,11 +50,11 @@ QQ 消息 → SnowLuma(OneBot v11) → 本桥接进程 → DSH 会话 → agent 
 
 | 路径 | 职责 | 什么时候改它 |
 |---|---|---|
-| `src/bridge.js` | **主程序**（~8.2k 行）。QQ 事件处理、会话映射、模式逻辑、控制台 HTTP、social/reserved2 仿真 | 业务逻辑 |
+| `src/bridge.js` | **主程序**（~8.2k 行）。QQ 私聊事件处理、会话映射、模式逻辑、控制台 HTTP、social/reserved2 仿真 | 业务逻辑 |
 | `src/settings-merge.js` | **设置页 → cfg 的合并规则**（纯函数：只覆盖 user 层、撤销时回磁盘值） | 改优先级/覆盖规则时 |
 | `src/dsh-client.js` | **DSH 0.1.2 客户端**。鉴权、端点调用、事件流多路复用、提问/审批双向翻译 | DSH 协议变更时 |
 | `src/dsh-client.0.1.1.js.bak` | 上游原文件（对照用，**不要改动、不要删**） | 永不 |
-| `src/mcp-*.js` | 三个 MCP server，作为子进程被 DSH 拉起 | 给 agent 加工具时 |
+| `src/mcp-*.js` | 三个 MCP server，作为子进程被 DSH 拉起。`mcp-snowluma-safe.js` 对外 **30 个 `qq_*` 工具，全部是私聊语义**（没有群工具） | 给 agent 加工具时 |
 | `dsh/agent-presets/qq-chat*/` | 两个 DSH agent preset（**安全边界在这**） | 改 agent 人格/权限时 |
 | `plugins/qq-mode-console/` | **DSH 设置页的「QQ 机器人」分区**（host 注册 settings 命名空间 + client 渲染整页表单） | 加/改可调项时 |
 | `plugins/qq-wake/` | **DSH 侧边栏「唤醒」按键**：host 路由 `/api/qq-wake/*` + client DOM 行 | 改唤醒行为时 |
@@ -59,11 +65,12 @@ QQ 消息 → SnowLuma(OneBot v11) → 本桥接进程 → DSH 会话 → agent 
 | `scripts/test-wake.mjs` | 唤醒流程自测（`--status` / `--no-send` / `--guards` 守护规则） | — |
 | `scripts/test-wake-client.mjs` | 唤醒按键**客户端半侧**自测（jsdom 造仿 DSH 侧边栏） | — |
 | `scripts/test-wake-fence.mjs` | **唤醒路由的信任围栏**自测（主机名严格字面量、回环、同源标记、写操作 JSON）；`--live` 打真路由 | 改围栏判定时 |
+| `scripts/test-no-group.mjs` | **「只有私聊」的回归测试**（隔离实例 + 假 OneBot：灌群消息断言零影响、灌私聊断言正常处理） | 改消息入口 / 白名单 / 发送链时 |
 | `tools/dsh-qq-bot.ps1` | 守护脚本（**可选自启**，默认不装） | 改运维策略时 |
 | `scripts/setup-dsh.mjs` | DSH 端安装 | 安装流程变更时 |
 | `scripts/dsh-status.mjs` | 状态总览（**排查第一步**） | — |
 | `scripts/publish-fork.mjs` | **不依赖 git push** 的发布工具（走 GitHub Git Data API，只传变更文件） | 往 fork 推改动时 |
-| `PORTING-DSH-0.1.2.md` | 移植记录（协议差异、缺陷复盘、实测证据） | 每次实质改动后 |
+| `PORTING-DSH-0.1.2.md` | 移植记录（协议差异、缺陷复盘、实测证据）。**历史文档**：其中的「群」相关描述是移植当时的状态 | 每次实质改动后 |
 
 **关键认知**：`bridge.js` 虽然大，但**业务逻辑与 DSH 协议是解耦的**。
 `dsh-client.js` 对外保持旧协议的调用面与返回契约
@@ -135,12 +142,14 @@ Host→客户端: {"type":"item","streamId":…,"value":…} / {"type":"end",…
 ## 4. 配置（`config.json`，**不入库**；模板见 `config.example.json`）
 
 **改配置的首选入口是 DSH 设置页的「QQ 机器人」分区**（见 §5.2；在设置左边导航里，
-「通用设置」正下方）—— 它把下面这张表整份搬到了 UI 上，156 项全可改，每项都带详细说明。优先级：
+「通用设置」正下方）—— 它把下面这张表整份搬到了 UI 上，140 项全可改，每项都带详细说明。优先级：
 **设置页里改过的字段 > config.json（磁盘） = 桥接控制台改的值 > 代码默认值**
 （桥接只覆盖「你在设置页里动过的那几项」，没动过的它一个字都不碰）。
 
 > 字段清单的唯一真源是 `plugins/qq-mode-console/lib/schema.js` 的 `FIELDS` 表；
 > 下面这张表只是**重点项的速查**，不是全集。
+> **里面没有任何群相关字段**：`allow.groups` / `deny.groups` / 群仿真参数等 16 个字段
+> 已随群聊能力一起删除，别再往 `config.json` 里写。
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -151,7 +160,8 @@ Host→客户端: {"type":"item","streamId":…,"value":…} / {"type":"end",…
 | `snowluma.httpUrl` | `http://127.0.0.1:3000` | SnowLuma 的 **HTTP API** 地址。**填成纯 WS 端口会报 HTTP 426** |
 | `snowluma.accessToken` | 空 | 两端**必须同一个值**；若用 3000 那条（见 §7）只需一个 token |
 | `ownerQQ` | 必填 | **管理员本人的 QQ**，不是机器人号。见 §7 |
-| `allow.private` / `allow.groups` | `[]` | 白名单。为空且 `allowAllWhenEmpty:false` ⇒ 什么都不放行 |
+| `allow.private` | `[]` | **私聊**白名单（QQ 号数组）。为空且 `allowAllWhenEmpty:false` ⇒ 什么都不放行。**没有 `allow.groups`** —— 群聊已移除 |
+| `deny.private` | `[]` | **私聊**黑名单，优先级高于白名单 |
 | `relayApprovalsToOwner` | `true` | 把非 QQ 会话的审批转发到管理员私聊 |
 | `notifyTaskDone` | `true` | DSH 任务完成通知总开关 |
 | `notifyTaskDoneMinTurnMs` | `300000` | 只通知跑够这么久的回合（**用户选定 5 分钟**） |
@@ -213,8 +223,8 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
 ### 5.2 设置页「QQ 机器人」分区（`plugins/qq-mode-console/`）
 
 配置的**主入口**：DSH「设置」左边导航里**「通用设置」正下方**那个 **QQ 机器人**分区
-（`settings.section`，order=1），156 个字段按 10 组分好
-（基本 / 通知 / 白名单 / 黑名单 / 安全 / 黑话学习 / 一代仿真 / 二代仿真 / 模型 / SnowLuma 接线），
+（`settings.section`，order=1），140 个字段按 10 组分好
+（基本 / 通知 / 白名单 / 黑名单 / 安全 / 黑话学习 / 一代仿真 / 二代仿真 / 模型与 DSH 接线 / SnowLuma 接线），
 每个字段都带一段中文说明，改完点保存 → 桥接 5 秒内生效。
 
 机制（改之前必读）：
@@ -257,16 +267,20 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
 | `node scripts/test-preset-012.mjs qq-chat` | preset 能否建会话并跑完回合 | `回合结束 reason = completed` |
 | `node scripts/test-dsh-question-012.mjs` | 提问 waterfall（**慢**，真实跑一轮 agent） | 收到 `question/requested` 并能作答 |
 | `node scripts/fake-onebot.mjs` | **无 QQ 也能端到端测桥接** | 注入私聊后打印桥接回发的消息 |
+| `node scripts/test-no-group.mjs` | **「群聊已彻底移除」回归测试**：起隔离实例 + 假 OneBot，灌群消息断言零影响（不建会话、不投递、不回复），再灌私聊断言照常处理作为对照 | 17 项全 ✓、`✅ 群聊已被彻底移除，私聊不受影响`、`exit 0` |
 | `node scripts/test-wake.mjs --status` | 侧边栏「唤醒」按键的宿主侧逻辑：守护/桥接/OneBot 登录态 | `awake: true`，`exit 0` |
 | `node scripts/test-wake.mjs --no-send` | 唤醒的**冷启动**链路（不发 QQ 消息） | 三步全 ✓，`exit 0` |
 | `node scripts/test-wake.mjs --guards` | **唤醒的守护规则**：并发调用复用同一次（单飞）、锁会释放、SnowLuma 目录不存在时干净失败 | 3 项全 ✓、`exit 0` |
 | `node scripts/test-wake-client.mjs` | **客户端半侧**（jsdom 造仿 DSH 侧边栏）：行是否落在「技能中心」正下方、点击是否打唤醒路由、外壳未就绪时是否不抛 | 13 项全 ✓，`exit 0`（缺 jsdom 则跳过） |
 | `node scripts/test-wake-fence.mjs [--live]` | **唤醒路由的信任围栏**（38 项：主机名严格字面量、socket 回环、`sec-fetch-site`/`Origin`、写操作必须 JSON）。加 `--live` 再打一遍运行中的真路由（自动发现端口） | 38 项全 ✓、`exit 0`；`--live` 时「本机 200 / 伪装 Host 403 / 跨站 Origin 403」 |
-| `node scripts/test-qq-settings.mjs` | **设置项**：字段表 ↔ schema ↔ `config.json` 是否对得上（覆盖率/重复/类型/说明长度/两边分组表一致） | 156 项全 ✓、`config.json` 全覆盖（机密除外）、`exit 0` |
+| `node scripts/test-qq-settings.mjs` | **设置项**：字段表 ↔ schema ↔ `config.json` 是否对得上（覆盖率/重复/类型/说明长度/两边分组表一致） | 140 项全 ✓、`config.json` 全覆盖（机密除外）、`exit 0` |
 | `node scripts/test-settings-merge.mjs` | **设置覆盖规则**（纯函数单测，24 项）：只覆盖 user 层、控制台改动不被冲掉、撤销回磁盘值、深拷贝隔离 | 24 项全 ✓、`exit 0` |
 | `node scripts/test-qq-settings-page.mjs` | **设置页**：注册进 `settings.section`、`order=1`、SSR 渲染出 10 个分组与字段说明 | 15 项全 ✓、`exit 0`（缺 react 则跳过） |
 | `node scripts/test-plugin-entry.mjs` | **插件入口**：每个 `plugins/<name>` 的入口真能 import 进来、导出了 `name`/`apply`/`inject`、客户端半侧文件在、`cordis.patch.yml` 的 id 对得上 | 15 项全 ✓、`exit 0`。**入口写错会让整个 harness 起不来，改完插件务必先跑这支** |
 | `node scripts/scan-secrets.mjs` | **发布/提交前自检**：有没有把令牌、真实 QQ 号、本机路径写进会入库的文件 | `✅ 未发现敏感信息`，`exit 0` |
+
+> 已删除：`scripts/send-test-group.mjs`（群发测试脚本）—— 群聊移除后它没有存在意义，
+> 别再在任何命令列表里引用它。
 
 **沙箱/CI 注意**：本机 PowerShell 管道捕获 `node` 输出会被沙箱拦（命名管道），
 裸跑 `node x.js` 让输出继承 stdout 即可。改完 `.ps1` 必须确认 **UTF-8 BOM** 还在（见 §7）。
@@ -282,7 +296,9 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
    `hook auto-load enabled` 和 `[Hook] login detected`。
 2. **`ownerQQ` 是本人 QQ，不是机器人 QQ。** 代码用 `event.user_id`（发送者）与它比对判定
    管理员；且 `user_id === self_id`（机器人自己发的）消息会被**直接丢弃**。
-   所以只有本人号才有意义，且测试时要用**另一个号**给机器人发消息。
+   所以只有本人号才有意义。**测私聊要用机器人号以外的 QQ 号**给机器人发消息：
+   用机器人号自己发会被丢弃，用不在 `allow.private` 里的号发则会被白名单忽略
+   （群消息现在是整体忽略，压根进不了这条链路）。
 3. **`httpUrl` 必须是 HTTP API 端口**，填成纯 WS 端口报 `HTTP 426`。
    SnowLuma 的「HTTP 服务端」条目若 `enableWebSocket=true`，
    则**同一端口同时提供 HTTP API 与 WebSocket 且共用一个 token** ——
@@ -325,6 +341,11 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
     必须按 **IP 字面量严格解析**（四段十进制 + 每段 ≤255 + 首段 127）。
     另外记住：**测围栏要穷举「攻击者能构造的请求头」，只测自己想到的那几种等于没测** ——
     上一轮审计就是漏了这一种才误判成"没问题"。护栏：`scripts/test-wake-fence.mjs`。
+15. **群聊是「已移除」而不是「没配」**：收到带 `group_id` 的事件时没有降级路径、
+    没有开关能打开它 —— 别去 `config.json` 里找 `allow.groups`（那字段已被删，
+    写了也无效），也别期待 `/api/send/group` 之类的路由（已删）。
+    **私聊引用回复走 `POST /api/send/reply` + `body.userId`**（旧版是 groupId）。
+    要确认这条边界还在，跑 `node scripts/test-no-group.mjs`。
 
 ---
 
@@ -340,6 +361,7 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
 | agent 收到消息但不回 | `state/bridge.log` | 模式是 `reserved2`（AI 自主决定/走工具），或 preset 未安装 |
 | 回复没转发到 QQ | 日志找 `turn/end` | 见 §3.4 第一条（`turn/start` 缺失） |
 | 审批没到手机 | `relayApprovalsToOwner` | 或该会话被映射到了别的 QQ 会话 |
+| **群里的消息完全没有反应** | —— | **设计如此**：群聊能力已移除，群消息被直接忽略（§0、坑 15）。只有私聊会被处理 |
 | 侧边栏**没有「唤醒」按键** | 页面是否刷新过（F5）；`/api/qq-wake/status` 是否 200 | 插件挂了但页面是旧的 → 刷新即可；路由也 404 则是 patch 层没挂上（重跑 `setup-dsh.mjs`） |
 | 点唤醒报「唤醒失败」 | tooltip 里那几行步骤 | 多半是 QQ 客户端没开/没登录（SnowLuma 注入不了），或桥接 60s 内没起来 |
 | 设置页里**找不到「QQ 机器人」分区** | 设置左边导航里「通用设置」下面有没有；DSH 重启过没有 | 分区由 client 半侧注册（`settings.section`）；改完插件要**重启 DSH** 才会加载（F5 不够） |
@@ -361,7 +383,9 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
 - **不要**为了「兼容」去改 `src/dsh-client.0.1.1.js.bak`。
 - **不要**把 `ownerQQ` 填成机器人号。
 - **不要**在发给管理员的审批里做敏感信息脱敏（会把目标路径藏掉，等于让用户闭眼批权限）；
-  群聊等其它会话仍应照常审计。
+  非 QQ 会话（你在 DSH 里开的编码会话等）的审批仍应照常审计。
+- **不要**把群聊能力「兼容回来」：不要再注册群消息入口、不要恢复群发送/群工具/群白名单字段
+  （已按用户要求彻底移除，见 §0、坑 15）。确实需要群聊时先问用户，别自作主张。
 - **不要**用 `process.exit()` 替代 `exitCleanly()`。
 - **不要**把带客户端半侧的插件入口写成仓库里的散文件 —— `dsh-client-modules` 是
   从「挂载文件**最近的 `package.json`**」里读 `dsh.client` 声明的，散文件找不到声明，
@@ -383,8 +407,9 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
 
 | 文档 | 内容 |
 |---|---|
-| `PORTING-DSH-0.1.2.md` | 移植全过程：协议差异表、**6 个缺陷复盘**（§7 入口导出漂移、§8 设置覆盖反噬 + 唤醒 4 隐患（含围栏被伪装 Host 穿过））、DSH 端安装、两个手机端能力 |
-| `docs/PROJECT_GUIDE.md` | 上游原版的项目指南（架构/数据流，协议部分已过时） |
-| `docs/DSH_SETUP.md` | DSH 端安装步骤（已按 0.1.2 更新） |
+| `PORTING-DSH-0.1.2.md` | 移植全过程：协议差异表、**6 个缺陷复盘**（§7 入口导出漂移、§8 设置覆盖反噬 + 唤醒 4 隐患（含围栏被伪装 Host 穿过））、DSH 端安装、两个手机端能力。**历史文档**：开头有「群聊已移除」的时效说明，群相关段落是移植当时的状态 |
+| `docs/PROJECT_GUIDE.md` | 项目说明书（架构/数据流/配置，已按「仅私聊」更新；协议细节以本文件与 PORTING 为准） |
+| `docs/DSH_SETUP.md` | DSH 端安装步骤（已按 0.1.2 与「仅私聊」更新） |
 | `tools/README.md` | 自启守护、常用命令、故障速查 |
 | `RULES.md` | 运行模式（chat / closed-agent / reserved / reserved2）与权限边界 |
+| `README.md` / `README.en.md` / `plugins/qq-mode-console/README.md` | 对外说明：功能、安装、设置页插件机制 |

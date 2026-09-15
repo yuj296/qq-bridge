@@ -20,14 +20,10 @@
   "allow": {
     "private": [
       123456789
-    ],
-    "groups": [
-      123456789
     ]
   },
   "deny": {
-    "private": [],
-    "groups": []
+    "private": []
   },
   "allowAllWhenEmpty": false,
   "ackMessage": "",
@@ -54,31 +50,13 @@
   },
   "social": {
     "maxReplyChars": 500,
-    "mustReplyKeywords": [
-      "deepseek",
-      "小鲸鱼",
-      "大肥鱼",
-      "鲸鱼",
-      "d指导",
-      "在吗"
-    ],
     "contextWindow": 20,
-    "triggerProbability": 0.1,
     "activeCheckMinMs": 8000,
     "activeCheckMaxMs": 30000,
     "idleWindowMs": 360000,
     "idleRetryProbability": 0.4,
-    "proactiveEnabled": true,
-    "proactiveIdleThresholdMs": 1800000,
-    "proactiveCheckMinMs": 2700000,
-    "proactiveCheckMaxMs": 5400000,
-    "proactiveProbability": 0.2,
     "activeReplyDelayMinMs": 1000,
     "activeReplyDelayMaxMs": 5000,
-    "activeDurationEnabled": true,
-    "activeDurationMinMs": 1200000,
-    "activeDurationMaxMs": 3000000,
-    "skipProbability": 0.05,
     "surrenderProbability": 0,
     "idleRetryWaitMs": 120000,
     "burstEnabled": true,
@@ -98,16 +76,13 @@
       "getUnread": true,
       "getRecent": true,
       "socialState": true,
-      "sendGroup": true,
       "sendPrivate": true,
       "reply": true,
-      "sendBurst": true,
       "sendMessage": true,
       "waitMessages": true,
       "feedback": true,
       "getMyRecent": true,
       "getMessageDetail": true,
-      "getActiveMembers": true,
       "setWakeConfig": true,
       "markRead": true,
       "memory": true,

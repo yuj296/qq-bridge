@@ -12,6 +12,7 @@
 >
 > | 想看什么 | 去哪 |
 > |---|---|
+> | **从零安装（依赖 / SnowLuma / config / DSH 接线 / 验证 / 故障速查）** | **[`INSTALL.md`](INSTALL.md)** ← 照着做就行 |
 > | **给 AI 代理读的项目说明**（文件地图 / 不变量 / 已知坑 / 改动约束） | **[`AGENTS.md`](AGENTS.md)** ← 最省时间 |
 > | 移植全过程（协议差异、缺陷复盘、实测证据） | [`PORTING-DSH-0.1.2.md`](PORTING-DSH-0.1.2.md) |
 > | DSH 端安装 | [`docs/DSH_SETUP.md`](docs/DSH_SETUP.md) |
@@ -20,16 +21,29 @@
 > **注意**：原版 README 里写的 `DSH Web API (127.0.0.1:3080/api)` 等描述针对 0.1.1；
 > 0.1.2 的地址/端口/令牌每次都变，客户端会从 harness 日志**自动发现**，详见 `AGENTS.md`。
 
+> ## ⚠️ 本 fork **只支持私聊**（群聊能力已移除）
+>
+> 桥接只服务 **主人（`ownerQQ`）↔ 机器人的私聊**：
+>
+> - 群消息入口已删除 —— 收到群事件（`group_id` 非空）时桥接**什么也不做**：不建会话、不投喂 agent、不回复；
+> - MCP 工具 30 个，**没有任何群工具**（`qq_list_groups` / `qq_get_group_history` / `qq_send_group_message` 等已删）；
+> - 配置里没有 `allow.groups` / `deny.groups`，只认 `allow.private` / `deny.private`；
+> - `/api/send/group` 路由已删；私聊引用回复走 `/api/send/reply` + `body.userId`。
+>
+> 边界回归测试：`node scripts/test-no-group.mjs`（断言群聊已被彻底移除、私聊不受影响）。
+
 **English**: [README.en.md](README.en.md) | **中文**: [README.md](README.md)
+
+📗 **从零安装请直接看 [`INSTALL.md`](INSTALL.md)**（环境要求 → SnowLuma → `config.json` → `setup-dsh.mjs` → 启动 → 自检 → 故障速查）。
 
 > 📘 详细内外核说明书见 **[docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md)**（架构、数据流、配置全解、调试与改进指南）。
 
-把 QQ 消息接入 DSH agent：QQ 好友/群发来的消息会变成 DSH 会话里的用户消息，agent 的回复（含提问、工具审批）会发回 QQ。
+把 QQ **私聊**消息接入 DSH agent：主人与机器人私聊发来的消息会变成 DSH 会话里的用户消息，agent 的回复（含提问、工具审批）会发回 QQ 私聊。
 
 ```
-QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──► DSH Web API (127.0.0.1:3080/api)
-                                                ▲                      │
-                                                └── agent 回复/提问/审批 ┘
+QQ 私聊消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──► DSH agent 会话
+                                                        ▲            │
+                                                        └ 回复/提问/审批 ┘
 ```
 
 ## 本 Fork 做了什么（相对上游原版）
@@ -40,47 +54,49 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
 | 增量 | 说明 | 主要位置 |
 | --- | --- | --- |
 | **DSH 0.1.2 协议移植** | 上游依赖 `@deepseek-ai/dsh-host-apiproxy`（该包在 DSH 0.1.2-alpha.1 被官方删除），**原版在新 DSH 上完全连不上**；本 fork 重写了客户端：`?token=` 换 cookie 鉴权、令牌/端口自动发现、`$events` waterfall 回执、`session/follow` 多路复用作事件流 | `src/dsh-client.js`、`PORTING-DSH-0.1.2.md` |
-| **设置页「QQ 机器人」分区** | DSH 设置左边导航里「通用设置」正下方新增一个分区，把 **156 项配置**按 10 组摊开（基本 / 通知 / 白名单 / 黑名单 / 安全 / 黑话学习 / 一代仿真 / 二代仿真 / 模型 / SnowLuma 接线），每项带一段中文说明；保存后桥接 **5 秒内生效**。优先级：**设置页改过的字段 > `config.json`（磁盘）= 桥接控制台改的值 > 代码默认值**，没动过的字段一个字都不碰；点重置即回磁盘值 | `plugins/qq-mode-console/` |
+| **只保留私聊** | 删掉全部群聊能力：群消息入口、群发送路由（`/api/send/group`）、6 个群 MCP 工具、16 个群相关配置字段、群语境话术；群消息一律忽略。私聊引用回复改走 `/api/send/reply` + `body.userId` | `src/bridge.js`、`src/mcp-snowluma-safe.js`、`plugins/qq-mode-console/lib/schema.js` |
+| **设置页「QQ 机器人」分区** | DSH 设置左边导航里「通用设置」正下方新增一个分区，把 **140 项配置**按 10 组摊开（基本 / 通知 / 白名单 / 黑名单 / 安全 / 黑话学习 / 一代仿真 / 二代仿真 / 模型与 DSH 接线 / SnowLuma 接线），每项带一段中文说明；保存后桥接 **5 秒内生效**。优先级：**设置页改过的字段 > `config.json`（磁盘）= 桥接控制台改的值 > 代码默认值**，没动过的字段一个字都不碰；点重置即回磁盘值 | `plugins/qq-mode-console/` |
 | **侧边栏「唤醒」按键** | 「技能中心」正下方一行，点一下＝拉起 SnowLuma + 桥接，并给管理员 QQ 发一句「睡醒了」；失败时按钮 tooltip 会显示卡在哪一步。路由只收**本机同源**请求（信任围栏按 IP 字面量严格解析，控制台令牌不下发到页面） | `plugins/qq-wake/` |
 | **审批与任务完成通知上手机** | agent 索要权限时把审批转发到管理员 QQ，回「通过 / 拒绝」即决策；跑够时长（默认 **5 分钟**）的回合结束后推一条完成通知，阈值与开关都能在设置页调 | `src/bridge.js`、`relayApprovalsToOwner` / `notifyTaskDone*` |
 | **可选自启守护（默认不装）** | `tools/` 下是一套「计划任务 + 5 分钟看门狗 + 心跳文件」的守护方案，`tools/install-task.ps1` 一键装。**默认不注册任何计划任务**：机器人平时不动，只在点「唤醒」时起来 | `tools/README.md` |
-| **给 AI 代理的项目说明** | 文件地图、数据流不变量、14 条已知坑、改动约束、验证清单 —— 一个没有上下文的代理读完就能上手 | [`AGENTS.md`](AGENTS.md)（权威性最高） |
-| **测试与自检** | 插件入口冒烟、设置字段覆盖/分组漂移、设置覆盖规则单测、唤醒流程与信任围栏、客户端半侧（jsdom）等 | `scripts/test-*.mjs`（见下文「自测」） |
+| **给 AI 代理的项目说明** | 文件地图、数据流不变量、15 条已知坑、改动约束、验证清单 —— 一个没有上下文的代理读完就能上手 | [`AGENTS.md`](AGENTS.md)（权威性最高） |
+| **测试与自检** | 插件入口冒烟、设置字段覆盖/分组漂移、设置覆盖规则单测、唤醒流程与信任围栏、客户端半侧（jsdom）、**「群聊已移除」回归**等 | `scripts/test-*.mjs`（见下文「自测」） |
 
 ## 项目展示
 
-📽️ [AI 仿真群友 - 项目介绍视频](assets/project-intro.mp4)
+📽️ [项目介绍视频（历史版本，拍摄于移除群聊能力之前，留有群聊/仿真群友演示）](assets/project-intro.mp4)
 
-> 视频文件位于 `assets/project-intro.mp4`，可直接下载观看。
+> 视频文件位于 `assets/project-intro.mp4`，可直接下载观看。**视频内容已不代表当前版本行为**：
+> 现在只服务私聊。
 
 ## 架构
 
-- **QQ 侧**：`@snowluma/sdk` 的 `SnowLumaWebSocketClient`（OneBot v11 WebSocket 客户端，自动重连）
-- **DSH 侧**：复用官方 `@deepseek-ai/dsh-host-apiproxy` 的 `AbstractApiClient` 与 zod schema，桥接进程实现 Node 传输层（fetch unary + WebSocket 下行事件流）
+- **QQ 侧**：`@snowluma/sdk` 的 `SnowLumaWebSocketClient`（OneBot v11 WebSocket 客户端，自动重连），只看**私聊**事件
+- **DSH 侧**：`src/dsh-client.js` 自实现 0.1.2 协议（令牌→cookie 鉴权、端点/令牌自动发现、`remote.mux` 一元调用与多路复用事件流），对外保持旧调用面，所以 `bridge.js` 的业务逻辑不需要跟着改
 - **agent 自主收发 QQ**：DSH 的 MCP 客户端（`~/.dsh/profiles/web/cordis.patch.yml` 配置）接入三个 MCP server：
-  - `snowluma`（桥接自带 `src/mcp-snowluma-safe.js`）：QQ 动作**安全子集**（查状态/查群/查消息/发消息，发送强制白名单；发送工具支持可选 `replyToMessageId` 引用回复）
+  - `snowluma`（桥接自带 `src/mcp-snowluma-safe.js`）：QQ 动作**安全子集**，共 **30 个工具，全部是私聊语义**（查状态/读消息/发消息/引用回复/等消息/记忆/黑话/表情…；发送强制白名单），**没有群工具**
   - `snowluma-host`（桥接自带 `src/mcp-host-server.js`）：`snowluma_status`（默认只读探活）；`start_snowluma` / `stop_snowluma` 需显式开启 `snowluma.allowProcessControl: true` 且仅在 `closed-agent` 模式可用
   - `web-search-safe`（桥接自带 `src/mcp-web-search-safe.js`）：只读 `web_search` / `web_fetch`（带 SSRF 防护），供 agent 查网络用语/资料
-- **会话模型**：每个 QQ 会话（私聊/群）对应一个独立的 DSH 会话，统一归组到「QQ 聊天」工作区（不再散落未分组）；映射持久化在 `state/sessions.json`
-- **性格定制**：QQ 会话默认使用 `qq-chat` agent preset（`~/.dsh/.agent-presets/qq-chat/agent.cordis.yml`），`reserved2` 使用 `qq-chat-v2`（`~/.dsh/.agent-presets/qq-chat-v2/agent.cordis.yml`）；人格与默认 DSH 一致（coding agent），仅附加 QQ 场景规则；**角色扮演**是可选机制——由控制台或管理端设置 `state/current-role.json` 注入（群友无法更改）
+- **会话模型**：每个 QQ **私聊**会话对应一个独立的 DSH 会话，统一归组到「QQ 聊天」工作区（不再散落未分组）；映射持久化在 `state/sessions.json`
+- **性格定制**：QQ 会话默认使用 `qq-chat` agent preset（`~/.dsh/.agent-presets/qq-chat/agent.cordis.yml`），`reserved2` 使用 `qq-chat-v2`（`~/.dsh/.agent-presets/qq-chat-v2/agent.cordis.yml`）；人格与默认 DSH 一致（coding agent），仅附加 QQ 私聊场景规则；**角色扮演**是可选机制——由控制台或管理端设置 `state/current-role.json` 注入（聊天对方无法更改）
 - **本地控制台**：桥接自带 Web 控制台 `http://127.0.0.1:3100`——切换运行模式（chat / closed-agent / reserved / reserved2）、设置角色、静默开关、查看活动日志、修改管理员/控制台令牌，全部即时生效；访问需要令牌（`config.json` 的 `consoleToken`，未配置时自动生成并打印在启动日志；控制台内可手动修改或重新生成）
 - **运行模式**：
-  - `chat`：白名单群 + 白名单私聊 → qq-chat 安全聊天
+  - `chat`：白名单私聊 → qq-chat 安全聊天
   - `closed-agent`：仅私聊 owner（config.json 的 ownerQQ，可在控制台设置）→ router-standard 完整工具，可在 QQ 上操控 DSH
-  - `reserved`（一代仿真）：仿真群友，观望/活跃/试探/退场状态机，选择性参与、按空格分句发送、主动收尾
+  - `reserved`（一代仿真）：私聊仿真，观望/活跃/试探/退场状态机，选择性参与、按空格分句发送、主动收尾
   - `reserved2`（二代仿真，运行 `setup-dsh.mjs` 后 DSH 默认）：文本不自动转发，AI 通过 `qq_get_unread_messages` / `qq_send_message` 等工具自主看消息、发言、等待、设置唤醒/潜水；DSH 端使用 `qq-chat-v2` preset
 - **交互增强**：
   - agent 通过 `ask_user_question` 提问时，问题会转发到 QQ，回复即自动应答
   - agent 请求工具审批时，转发到 QQ，回复「通过」/「拒绝」即可决策
   - 支持 DSH 斜杠命令（如 `/model`）与 `/reset`（重置会话上下文）
-  - 群聊引用/回复会解析成「被引用人 + 原文」注入 DSH（如 `[引用 Derp：El Psy Kongroo是啥]机关的走狗`），让 AI 判断这句话是对谁说的，不会把群友之间引用第三方的对话误当成指向自己；引用机器人自己时会被视为必回
-  - MCP 发送工具支持可选 `replyToMessageId`，并新增专用 `qq_reply` 工具：AI 可以先用 `qq_get_group_history` 拿到真实消息 id，再引用/回复某条消息（是否允许 AI 主动使用由人格/策略决定；桥接会检测发送类工具调用并自动跳过该回合的重复自动转发）
+  - 私聊引用/回复会解析成「被引用人 + 原文」注入 DSH（如 `[引用 Derp：El Psy Kongroo是啥]机关的走狗`），让 AI 知道这句话在回哪条；引用机器人自己时会被视为必回
+  - MCP 发送工具支持可选 `replyToMessageId`，并新增专用 `qq_reply` 工具（**私聊引用回复**，目标参数是 `userId`）：AI 可以先用 `qq_get_recent_messages` / `qq_get_unread_messages` / `qq_get_message_detail` 拿到真实消息 id，再引用/回复某条消息（是否允许 AI 主动使用由人格/策略决定；桥接会检测发送类工具调用并自动跳过该回合的重复自动转发）
   - 一代仿真模式（`reserved`）下，AI 可以只输出 `[SILENT]` 表示“潜水/不接话”，桥接会静默不发送
   - 一代仿真模式（`reserved`）按空格分句：AI 用空格表示拆成多条消息；中英文/数字之间的空格也会被当成分条信号，不想分条就不要加空格（`reserved2` 不适用，分条请用 `qq_send_message` 数组）
 
 ## 前置条件
 
-1. 运行中的 DeepSeek Harness Web（默认 `http://127.0.0.1:3080`）
+1. 运行中的 DeepSeek Harness（0.1.2；地址/端口/令牌每次启动都会变，桥接会自动发现）
 2. 运行中的 SnowLuma，且配置好 OneBot WebSocket 与 HTTP API（默认 `ws://127.0.0.1:3001` / `http://127.0.0.1:3000`，`accessToken` 视配置填写）
 3. Node.js ≥ 22.13
 
@@ -93,7 +109,7 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 复制 `config.example.json` 为 `config.json` 后编辑：
 
 > 💡 **更省事的方式**：装好插件后直接在 **DSH「设置 → QQ 机器人」**里改 ——
-> 156 项全在 UI 上、每项带中文说明，保存后桥接 5 秒内生效，不用手写 JSON。
+> 140 项全在 UI 上、每项带中文说明，保存后桥接 5 秒内生效，不用手写 JSON。
 > `config.json` 仍然有效（适合脚本化部署），两者的优先级见上文表格。
 
 > Windows CMD 用户请用：`copy config.example.json config.json`
@@ -102,22 +118,26 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 
 | 字段 | 说明 |
 | --- | --- |
-| `dsh.baseUrl` | DSH Web 地址，默认 `http://127.0.0.1:3080` |
+| `dsh.baseUrl` | DSH 地址，默认 `http://127.0.0.1:3080`（留默认即走自动发现） |
 | `dsh.provider` / `dsh.model` / `dsh.reasoningEffort` | DSH 会话使用的模型/推理强度；若你的 DSH 没有示例中的模型，改成 DSH 设置页里可用的模型即可（选择失败只打日志，不阻塞启动） |
 | `snowluma.wsUrl` | SnowLuma OneBot **WebSocket** 地址（如 `ws://127.0.0.1:3001`） |
 | `snowluma.httpUrl` | OneBot **HTTP API** 地址（如 `http://127.0.0.1:3000`）；不要填 WebSocket 端口，否则会报 HTTP 426 |
 | `snowluma.accessToken` | OneBot accessToken，未配置留空 |
 | `snowluma.launcherPath` / `homeDir` | SnowLuma 启动脚本与安装目录（供 agent 自动启动/停止） |
+| `ownerQQ` | **主人本人的 QQ 号**（不是机器人号）：只有这个号能批复权限、收到审批转发 |
 | `agentPreset` | QQ 会话使用的 DSH agent preset，默认 `qq-chat`（改性格见下文） |
 | `socialV2.agentPreset` | `reserved2` 模式使用的 DSH agent preset，默认 `qq-chat-v2` |
 | `workspaceTitle` | QQ 会话在 DSH 界面中的归组名称，默认「QQ 聊天」 |
-| `allow.private` / `allow.groups` | 白名单（QQ 号/群号数组）；留空且 `allowAllWhenEmpty: true` 时放行全部 |
-| `deny.*` | 黑名单，优先于白名单 |
+| `allow.private` | **私聊**白名单（QQ 号数组）；留空且 `allowAllWhenEmpty: true` 时放行全部 |
+| `deny.private` | **私聊**黑名单，优先于白名单 |
 | `ackMessage` | 消息投递后的立即回复，空字符串关闭 |
 | `sendDelayMs` | QQ 连续发送间隔，防止触发频率限制 |
 | `consolePort` | 本地控制台端口，默认 `3100` |
 | `consoleToken` | 控制台访问令牌；留空时启动自动生成并保存到 `state/console-token` |
 
+> ⚠️ 已删除的群字段：`allow.groups` / `deny.groups` 以及群仿真参数等 16 个字段**不再存在**，
+> 写进 `config.json` 也不会被读。群消息一律忽略。
+>
 > ⚠️ `allowAllWhenEmpty: true` 表示「白名单没填就全部放行」——把 agent 接入 QQ 等于把账号控制权交给了模型，建议先填白名单。
 
 ### DSH 端安装（另一台设备 / 新环境）
@@ -137,7 +157,7 @@ node scripts/setup-dsh.mjs
 共 5 步，DSH 和桥接都已就绪，缺的只是 SnowLuma 本体：
 
 1. **DSH**（已运行，无需操作）
-   确认 `http://127.0.0.1:3080` 能打开即可。
+   确认 DSH Web 能打开即可（0.1.2 的端口/令牌见 `AGENTS.md`）。
 
 2. **下载并解压 SnowLuma**
    - 下载：<https://github.com/SnowLuma/SnowLuma/releases/latest> 选 `SnowLuma-v<版本>-win-x64.zip`（完整版，自带 Node 运行时；Lite 版需本机 Node 22.13+）
@@ -157,14 +177,14 @@ node scripts/setup-dsh.mjs
    }
    ```
    `wsUrl` 是 OneBot **WebSocket** 端口，`httpUrl` 是 OneBot **HTTP API** 端口（不要填成同一个 WS 端口，否则 MCP 工具会报 HTTP 426）。
-   建议顺手把 `allow.private` / `allow.groups` 白名单填上。
+   建议顺手把 `allow.private` 白名单填上。
 
 5. **启动桥接**
    ```bash
    cd qq-bridge
    npm start          # 或双击 start.bat
    ```
-   看到 `SnowLuma 已连接` 即成功；然后 QQ 上给机器人账号发条消息测试。
+   看到 `SnowLuma 已连接` 即成功；然后**用主人号私聊机器人账号**发条消息测试（群消息不会有任何反应）。
 
 ## 运行与运维
 
@@ -187,7 +207,6 @@ npm start          # 或双击 start.bat（守护模式：崩溃自动重启，�
 12:00:02 [bridge] 已投递 private:12345678: 你好
 12:00:20 [bridge] agent 回复 (private:12345678) 42 字
 ```
-```
 
 ## 自测（不需要 SnowLuma / QQ）
 
@@ -207,6 +226,7 @@ node scripts/test-plugin-entry.mjs     # 插件入口冒烟（两个插件的入
 node scripts/test-qq-settings.mjs      # 设置字段表 ↔ schema ↔ config.json 覆盖率与分组一致性
 node scripts/test-qq-settings-page.mjs # 设置页：注册进 settings.section、order=1、SSR 渲染结果
 node scripts/test-settings-merge.mjs   # 设置覆盖规则（只覆盖 user 层、撤销回磁盘值）
+node scripts/test-no-group.mjs         # 「群聊已彻底移除」回归：灌群消息零影响、灌私聊照常处理
 node scripts/test-wake.mjs --status    # 唤醒按键：守护 / 桥接 / OneBot 登录态
 node scripts/test-wake.mjs --no-send   # 唤醒的冷启动链路（不发 QQ 消息）
 node scripts/test-wake.mjs --guards    # 唤醒守护规则（单飞锁 / 锁释放 / 缺目录时干净失败）
@@ -223,7 +243,7 @@ node scripts/scan-secrets.mjs          # 发布/提交前：有没有把令牌�
 ```
 qq-bridge/
   AGENTS.md             # 给 AI 代理读的项目说明（文件地图 / 不变量 / 已知坑 / 约束）
-  PORTING-DSH-0.1.2.md  # DSH 0.1.2 移植记录（协议差异、缺陷复盘、实测证据）
+  PORTING-DSH-0.1.2.md  # DSH 0.1.2 移植记录（协议差异、缺陷复盘、实测证据；历史文档）
   config.example.json   # 配置模板（脱敏占位符；真实 config.json 不入库）
   docs/
     PROJECT_GUIDE.md    # 公开版项目说明书
@@ -233,8 +253,9 @@ qq-bridge/
     qq-mode-console/    # DSH 设置页「QQ 机器人」分区（host 注册命名空间 + client 渲染表单）
     qq-wake/            # DSH 侧边栏「唤醒」按键（host 路由 /api/qq-wake/* + client DOM 行）
   src/
-    bridge.js           # 主程序
+    bridge.js           # 主程序（只处理私聊）
     dsh-client.js       # Node 版 DSH API 客户端（0.1.2 协议：鉴权 + mux 事件流）
+    mcp-snowluma-safe.js # 30 个私聊 QQ 工具
     settings-merge.js   # 设置页 → 运行时 cfg 的合并规则（只覆盖用户改过的字段）
     md-to-plain.js      # Markdown → QQ 纯文本
     self-test.js        # DSH 侧自测
@@ -249,6 +270,7 @@ qq-bridge/
 
 ## 已知限制
 
+- **只支持私聊**：群消息（含群 @、群引用、群成员名片）一律忽略，桥接里没有群相关代码路径
 - agent 回复在回合结束时一次性发送（不做流式逐字转发）；回复超过 4000 字自动分段
 - QQ 图片/语音/视频会转成 `[图片]` 等占位文本给 agent
 - agent 的 Markdown 回复会转成纯文本（链接保留 `文字 (url)` 形式）

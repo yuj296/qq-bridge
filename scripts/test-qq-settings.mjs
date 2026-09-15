@@ -3,13 +3,15 @@
 //   node scripts/test-qq-settings.mjs
 //
 //   node scripts/test-qq-settings.mjs           # 全量输出
-//   node scripts/test-qq-settings.mjs --quiet   # 只出结论（156 项逐条太吵）
+//   node scripts/test-qq-settings.mjs --quiet   # 只出结论（140 项逐条太吵）
 //
-// 校验四件事：
+// 校验五件事：
 //   1. 字段表里每个路径都真的建进了 schema（防拼错）
 //   2. config.json 里的每一项都被字段表覆盖（"除了机密全都可改" 这条承诺）
 //   3. 用 config.json 当 base 解析 schema 不报错（防类型不匹配）
 //   4. 字段表没有重复路径
+//   5.（第 8 节）本项目**只保留私聊**：群白/黑名单、群专属仿真参数、群工具开关删了就不许回来，
+//      文案里也不许再出现「群」。
 //
 // schemastery 不在本仓库依赖里 —— 从 DSH Desktop 自带的那份拿；拿不到就跳过。
 
@@ -193,6 +195,43 @@ console.log('\n=== 7. 每个字段都有"详细说明" ===');
   });
   const avg = Math.round(lengths.reduce((a, b) => a + b, 0) / lengths.length);
   console.log(`    说明平均 ${avg} 字，最长 ${Math.max(...lengths)} 字，最短 ${Math.min(...lengths)} 字`);
+}
+
+console.log('\n=== 8. 群聊能力已彻底移除（只保留私聊）===');
+{
+  // 这些字段全部是群专属：群白名单 / 群黑名单 / 群聊插话与主动开话题 / 活跃超时退场 /
+  // 选择性沉默 / 群工具开关。本项目只做「用户 ↔ 机器人私聊」，删掉的不许回来。
+  const REMOVED = [
+    'allow.groups',
+    'deny.groups',
+    'social.triggerProbability',
+    'social.mustReplyKeywords',
+    'social.activeDurationEnabled',
+    'social.activeDurationMinMs',
+    'social.activeDurationMaxMs',
+    'social.proactiveEnabled',
+    'social.proactiveIdleThresholdMs',
+    'social.proactiveCheckMinMs',
+    'social.proactiveCheckMaxMs',
+    'social.proactiveProbability',
+    'social.skipProbability',
+    'socialV2.tools.sendGroup',
+    'socialV2.tools.sendBurst',
+    'socialV2.tools.getActiveMembers'
+  ];
+  const configLeaves = configPaths(config);
+  const inFields = REMOVED.filter((p) => declared.includes(p));
+  check('群聊字段已从字段表移除', inFields.length === 0, inFields.join(', '));
+  const inSchema = REMOVED.filter((p) => built.has(p));
+  check('群聊字段已从 schema 移除', inSchema.length === 0, inSchema.join(', '));
+  const inConfig = REMOVED.filter((p) => configLeaves.includes(p));
+  check('群聊字段已从 config.json 移除', inConfig.length === 0, inConfig.join(', '));
+  const groupPaths = [...declared, ...configLeaves].filter((p) => /(^|\.)groups$/.test(p));
+  check('没有任何 *.groups 路径残留', groupPaths.length === 0, groupPaths.join(', '));
+  const groupWording = FIELDS.filter(([, , label, detail]) => /群/.test(`${label}${detail}`)).map(([p]) => p);
+  check('字段文案里不再出现「群」', groupWording.length === 0, groupWording.join(', '));
+  const groupDesc = Object.entries(GROUPS).filter(([, meta]) => /群/.test(`${meta.title}${meta.desc}`)).map(([key]) => key);
+  check('分组标题/说明里不再出现「群」', groupDesc.length === 0, groupDesc.join(', '));
 }
 
 console.log(failures === 0 ? '\n✅ 全部通过' : `\n❌ ${failures} 项失败`);

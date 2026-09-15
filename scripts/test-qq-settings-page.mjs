@@ -148,6 +148,16 @@ console.log('\n=== 3. 字段说明覆盖 ===');
   check('每个字段都带「标签｜说明」两段', missing.length === 0, missing.slice(0, 6).join(', '));
 }
 
+console.log('\n=== 4. 只讲私聊：页面上不该再有「群」===');
+{
+  // 本项目已彻底去掉群聊能力（字段表、分组文案、客户端兜底表三处一起改干净）。
+  const hits = [...new Set(html.match(/[^<>"]{0,10}群[^<>"]{0,10}/g) ?? [])];
+  check('渲染结果里没有任何「群」字样', hits.length === 0, hits.slice(0, 3).join(' ／ '));
+  const ghosts = ['allow.groups', 'deny.groups', 'qq_send_group_message', 'qq_send_burst', 'qq_get_active_members']
+    .filter((text) => html.includes(text));
+  check('已删的群字段/群工具没有渲染回页面', ghosts.length === 0, ghosts.join(', '));
+}
+
 console.log(failures === 0 ? '\n✅ 全部通过' : `\n❌ ${failures} 项失败`);
 process.exitCode = failures === 0 ? 0 : 1;
 setTimeout(() => process.exit(failures === 0 ? 0 : 1), 100).unref?.();

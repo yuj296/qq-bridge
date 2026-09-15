@@ -1,6 +1,8 @@
 # DSH QQ 桥接（qq-bridge）项目说明书
 
-> 让 DeepSeek Harness（DSH）的 agent 以“仿真群友”身份接入 QQ 群/私聊。
+> 让 DeepSeek Harness（DSH）的 agent 接入 QQ **私聊**。
+> **本仓库只服务「主人（`ownerQQ`）↔ 机器人的私聊」：群聊能力已彻底移除 —— 群消息会被直接忽略**
+> （没有群消息入口、没有群发送路由、MCP 里没有群工具、配置里没有 `allow.groups` / `deny.groups`）。
 > 本文是面向公开仓库的精简版说明；本地开发历史、个人配置与运行状态不会包含在仓库中。
 
 ---
@@ -9,9 +11,9 @@
 
 `qq-bridge` 是一个独立的 Node.js 进程，做三件事：
 
-1. **连接 QQ**：通过 SnowLuma（OneBot v11 WebSocket）收发 QQ 群/私聊消息。
-2. **连接 DSH**：通过 DSH Web API（默认 `127.0.0.1:3080`）创建会话、投递 prompt、接收事件流。
-3. **扮演群友**：在仿真模式下，用“观望/活跃/试探/退场”状态机决定何时说话、何时沉默、怎么分多条消息发，并注入人格角色（如小鲸鱼）。
+1. **连接 QQ**：通过 SnowLuma（OneBot v11 WebSocket）收发 QQ **私聊**消息（群事件一律忽略）。
+2. **连接 DSH**：通过 `src/dsh-client.js`（DSH 0.1.2：令牌→cookie 鉴权、端点/令牌自动发现、`remote.mux` 事件流）创建会话、投递 prompt、接收事件流。
+3. **扮演聊天对象**：在仿真模式下，用“观望/活跃/试探/退场”状态机决定何时说话、何时沉默、怎么分多条消息发，并注入人格角色（如小鲸鱼）。
 
 它不是简单的“QQ 消息转发器”，而是一个带**社交策略层**的桥。
 
@@ -33,11 +35,11 @@
 
 | 层 | 文件 | 职责 |
 |---|---|---|
-| 内核 | `src/bridge.js` | 主程序：QQ 消息接入、社交状态机、DSH 投递、发送链、控制台 API、安全审计 |
-| 内核 | `src/dsh-client.js` | DSH 协议客户端：RPC + WebSocket 事件流 + turn 收集 |
-| 内核 | `src/mcp-snowluma-safe.js` | 给 DSH agent 用的安全 QQ 工具（只读 + 白名单发送） |
+| 内核 | `src/bridge.js` | 主程序：QQ **私聊**消息接入、社交状态机、DSH 投递、发送链、控制台 API、安全审计 |
+| 内核 | `src/dsh-client.js` | DSH 0.1.2 协议客户端：令牌→cookie 鉴权 + `remote.mux` 事件流（`$events` + `session/follow`）+ turn 收集 |
+| 内核 | `src/mcp-snowluma-safe.js` | 给 DSH agent 用的安全 QQ 工具：**30 个，纯私聊语义**（只读 + 白名单发送），**无群工具** |
 | 内核 | `src/mcp-host-server.js` | 给 DSH agent 用的 SnowLuma 进程管理（默认禁用启停） |
-| 内核 | `src/slang-learner.js` | 群聊黑话/网络用语学习：存储、候选提取、研究调度、注入 |
+| 内核 | `src/slang-learner.js` | 私聊黑话/网络用语学习：存储、候选提取、研究调度、注入 |
 | 内核 | `src/mcp-web-search-safe.js` | 给 DSH agent 用的只读 Web Search MCP（查网络用语/梗） |
 | 外核 | `public/console.html` | 本地控制台：状态、参数、手动切换、重置 |
 | 外核 | `config.json` | 运行配置（白名单、QQ/DSH 地址、社交参数）；**不入库** |
@@ -94,19 +96,19 @@ qq-bridge/
 ### 4.1 一条 QQ 消息的完整旅程
 
 ```
-QQ 消息
+QQ 私聊消息
   │
   ▼
-bot.onGroupMessage / onPrivateMessage (bridge.js)
+bot.onPrivateMessage (bridge.js)      ← 群事件没有入口：bridge.js 不注册任何群消息处理
   │
   ▼
-handleIncoming(kind, id, event)
-  ├─ 白名单/模式检查（modeAllowed / allowed）
+handleIncoming('private', userId, event, cfg)
+  ├─ 白名单/模式检查（modeAllowed / allowed；只认 allow.private / deny.private）
   ├─ 管理命令拦截（/reset /role /silent 等，仅 owner）
   ├─ 挂起审批/提问优先处理（pending）
   ├─ 社交模式分支（仿真模式）：
   │     ├─ 观望期：按触发条件决定是否进活跃
-  │     ├─ 活跃期：私聊即时投递；群聊等轮询批量检测
+  │     ├─ 活跃期：私聊即时投递
   │     └─ 冷场/试探
   └─ 非社交模式：直接投递给 DSH
   │
@@ -117,34 +119,33 @@ ensureSession(key)  →  DSH session（工作区“QQ 聊天”）
 api.sessions.prompt({ mode: 'queue' })
   │
   ▼
-DSH 事件流（api.events.mux）→ pumpMux()
+DSH 事件流（/api/remote.mux：一条 $events + 每会话一条 session/follow）→ pumpMux()
   ├─ turn collector 收集模型输出
   ├─ 安全审计（SENSITIVE_RE）
   ├─ 社交模式：planSocialTimeline 分条 → sendBurstToQQ
   └─ 非社交模式：sendToQQ 直接发
 ```
 
-- 群聊里的 `@` 段会解析成群名片/昵称（带缓存），解析失败时回退为 QQ 号。
-- 引用/回复段会解析成被引用人的群名片/昵称 + 原文，注入 prompt。
+- 引用/回复段会解析成被引用人 + 原文，注入 prompt；引用机器人自己时会被视为必回。
 - 一代仿真模式（`reserved`）下，模型可以只输出 `[SILENT]` 表示“潜水/不接话”，桥接会静默不发送。
 - 一代仿真模式（`reserved`）的分条方式为“按空格分句”：AI 用空格表示下一条消息，桥接按空格拆条；`reserved2` 不适用，分条请用 `qq_send_message` 数组。
 
 ### 4.2 DSH 事件流 / turn 收集
 
-- `dsh-client.js` 的 `readWebSocket` 保持长连接 `events.mux`。
+- `dsh-client.js` 保持一条 `/api/remote.mux` WebSocket 长连接（多路复用：一条 `$events` + 每个登记会话一条 `session/follow`）。
 - `createTurnCollector` 按 `assistant/message` 累加文本，`turn/end` 时产出完整结果。
 - 摘要投喂会产生“静默 turn”：结果不发给 QQ，只作为记忆。
 
 ### 4.3 黑话学习 / 网络用语迭代
 
 ```
-群聊消息 → bridge 滚动窗口（slangWindows）
+私聊消息 → bridge 滚动窗口（slangWindows）
   → 攒够 extractMinMessages 条 → DSH 学习会话提取候选
   → 写入 state/slang.json（candidate，count+1，保留证据）
   → 达到 inferenceThresholds 时 → DSH 学习会话联网搜索确认
   → 生成 meaning/usage/example → 仍为 candidate
   → 控制台「黑话管理」人工确认/拒绝
-  → confirmed 词条 → 注入 QQ agent 的【群聊黑话表】
+  → confirmed 词条 → 注入 QQ agent 的【黑话表】
 ```
 
 - 学习会话与 QQ 会话隔离：学习输出不会发 QQ。
@@ -163,7 +164,7 @@ DSH 事件流（api.events.mux）→ pumpMux()
 | `acquireLock` / `releaseLock` | 单实例锁（原子 `fs.openSync('wx')` + stale 检测） |
 | `ensureSession` | 创建/复用 DSH 会话，带 `sessionEpoch` 防止 reset 竞态 |
 | `social` | 社交引擎状态（states / recentMessages / pendingSummaries / silentContext / silentTurns / pendingTimers） |
-| `socialLoopTick` | 每 5 秒扫描状态机：主动开话题、活跃检测、冷场、试探 |
+| `socialLoopTick` | 每 5 秒扫描状态机：活跃期检测新消息、冷场回观望或试探（一代仿真已删掉「观望期主动开话题」与「活跃超时退场」） |
 | `buildBatchPrompt` | 活跃期投递文本（只贴新消息 + 之前沉默的消息） |
 | `planSocialTimeline` | 按空格分句拆条（AI 用空格控制；单条 500 字安全上限） |
 | `sendBurstToQQ` | 分条发送：随机间隔/长间隔，最后一条不 sleep |
@@ -176,20 +177,20 @@ DSH 事件流（api.events.mux）→ pumpMux()
 ```
         观望 idle
         │   ▲
-  触发进活跃 │   │ 冷场/试探无回应 / 退场完成
+  触发进活跃 │   │ 冷场（大概率）
         ▼   │
        active ──冷场──► probing
         │                │
         └──新消息────────┘
         │
-        └──活跃超时──► exiting ──退场发言完成──► idle
+        └──试探无回应──► idle
 ```
 
-- **观望**：只记录消息到 `recentMessages` 和 `pendingSummaries`；触发条件包括被 @/关键词/提问、普通消息小概率、群长期静默后小概率主动开话题。
-- **活跃**：每 `activeCheckMinMs~MaxMs` 检测一次新消息；私聊即时投递，群聊按批量检测。
-- **退场（exiting）**：活跃超时后的过渡状态，等待 AI 的收尾发言发出。
+- **观望**：只记录消息到 `recentMessages` 和 `pendingSummaries`；触发条件包括被引用/提问、普通消息小概率（私聊里没有 @ 段，也不再有「群长期静默后主动开话题」）。
+- **活跃**：每 `activeCheckMinMs~MaxMs` 检测一次新消息；私聊即时投递，对方每条消息都回。
 - **冷场**：`idleWindowMs` 内无新消息 → 大概率回观望，小概率进试探。
 - **试探**：AI 主动说一句，`idleRetryWaitMs` 内无人回应则回观望。
+- 一代仿真**不再有「活跃超时退场」**（`exiting` 状态已随群聊能力一起删除）。
 
 ### 5.3 分条发送 / 错落感
 
@@ -203,25 +204,26 @@ DSH 事件流（api.events.mux）→ pumpMux()
 
 ### 5.4 MCP 工具
 
-`mcp-snowluma-safe.js` 给 DSH agent 暴露：
+`mcp-snowluma-safe.js` 给 DSH agent 暴露 **30 个工具，全部是私聊语义**（群工具已全部删除）：
 
 | 工具 | 说明 | 白名单 |
 |---|---|---|
 | `qq_status` | 登录状态 | 无 |
-| `qq_list_groups` | 群列表 | 只返回白名单群 |
-| `qq_get_group_members` | 群成员 | 群号必须白名单 |
-| `qq_get_group_history` | 群历史 | 群号必须白名单 |
-| `qq_send_group_message` | 发群消息；可选 `replyToMessageId` | allow+deny+allowAllWhenEmpty，纯文本段防 CQ 码 |
-| `qq_reply` | 专用“引用/回复”工具 | 同上 |
-| `qq_send_private_message` | 发私聊；可选 `replyToMessageId` | 同上 |
+| `qq_send_private_message` | 发私聊；可选 `replyToMessageId` | `allow.private` + `deny.private` + `allowAllWhenEmpty`，纯文本段防 CQ 码 |
+| `qq_reply` | 专用“私聊引用/回复”工具（目标参数是 `userId`，不再是 `groupId`） | 同上 |
 
 二代仿真模式（`reserved2`）还有：
 
-- 状态/消息：`qq_get_prompt`、`qq_get_unread_messages`、`qq_get_recent_messages`、`qq_get_message_detail`、`qq_get_active_members`、`qq_social_state`
-- 发送/互动：`qq_send_message`、`qq_send_burst`、`qq_send_poke`、`qq_send_sticker`
-- 等待/收尾：`qq_wait_for_messages`、`qq_mark_read`、`qq_set_wake_config`
-- 记忆/黑话/表情：`qq_memory_*`、`qq_slang_query`、`qq_slang_submit`、`qq_list_stickers`、`qq_get_sticker_image`、`qq_sticker_note`、`qq_collect_sticker`
+- 状态/消息：`qq_get_prompt`、`qq_get_unread_messages`、`qq_get_recent_messages`、`qq_get_message_detail`、`qq_get_my_recent_messages`、`qq_social_state`
+- 发送/互动：`qq_send_message`、`qq_send_poke`、`qq_send_sticker`
+- 等待/收尾：`qq_wait_for_messages`、`qq_mark_read`、`qq_set_wake_config`、`qq_report_feedback`
+- 读媒体：`qq_get_message_images`、`qq_get_forward_msg`
+- 记忆/黑话/表情库：`qq_memory_append`、`qq_memory_query`、`qq_memory_remove`、`qq_memory_clear`、`qq_slang_query`、`qq_slang_submit`、`qq_list_stickers`、`qq_get_sticker_image`、`qq_sticker_note`、`qq_set_sticker_remark`、`qq_collect_sticker`
 - 形象：`qq_get_self_image`
+
+> 已删除的群工具（不会再出现）：`qq_list_groups`、`qq_get_group_members`、`qq_get_group_history`、
+> `qq_get_active_members`、`qq_send_group_message`、`qq_send_burst`；`groupId` / `atUserId` /
+> `speakerIds` / `targetUserId` 这些群参数也一并删除（工具数 36 → 30）。
 
 `mcp-host-server.js`：
 
@@ -245,18 +247,22 @@ DSH 事件流（api.events.mux）→ pumpMux()
 | `snowluma.wsUrl` / `httpUrl` | OneBot WebSocket / HTTP API 地址；`httpUrl` 不要填 WebSocket 端口，否则会报 HTTP 426 |
 | `snowluma.accessToken` | OneBot 鉴权 token，未配置留空 |
 | `snowluma.launcherPath` / `homeDir` | SnowLuma 启动脚本与安装目录（进程管理用，默认禁用） |
-| `ownerQQ` | 管理员 QQ（最高权限，可在控制台「白名单 / 管理员」设置） |
+| `ownerQQ` | 主人**本人**的 QQ 号（不是机器人号；最高权限，可在控制台「白名单 / 管理员」设置） |
 | `agentPreset` | 聊天模式用的 DSH agent preset |
 | `workspaceTitle` | DSH 工作区名 |
-| `allow.private` / `allow.groups` | 白名单（QQ 号/群号数组） |
-| `deny.private` / `deny.groups` | 黑名单 |
+| `allow.private` | **私聊**白名单（QQ 号数组） |
+| `deny.private` | **私聊**黑名单（优先于白名单） |
 | `allowAllWhenEmpty` | 白名单为空时是否放行（fail-closed，默认 false） |
 | `sendDelayMs` | 非社交模式每条消息间隔 |
 | `consolePort` | 控制台端口，默认 3100 |
 | `consoleToken` | 控制台鉴权 token；空=启动时自动生成并保存到 `state/console-token` |
-| `security.interceptNotify` | 回复被安全拦截时是否在群里发提示 |
+| `security.interceptNotify` | 回复被安全拦截时是否给管理员发提示 |
 
-社交参数（控制台可调）包括：触发概率、活跃检测间隔、回复延迟、活跃时长、冷场窗口、试探概率、沉默概率、上下文窗口、单条长度上限、分条间隔、主动开话题参数等。
+> 群字段已删除：`allow.groups` / `deny.groups`，以及群专属仿真参数（触发概率、必答词、
+> 活跃时长、主动开话题、选择性沉默）与 3 个群工具开关，共 **16 项**；
+> 设置页字段数 **156 → 140**。写进 `config.json` 也不会被读取。
+
+社交参数（控制台可调）包括：活跃检测间隔、回复延迟、冷场窗口、试探概率、上下文窗口、单条长度上限、分条间隔等。
 
 黑话学习参数包括：`slang.enabled`、`extractMinMessages`、`extractCooldownMs`、`inferenceThresholds`、`injectMax`、`learnerPreset`、`workspaceTitle`、`autoResearch`。
 
@@ -297,7 +303,7 @@ DSH 事件流（api.events.mux）→ pumpMux()
 | `scripts/test-mcp-host.mjs` | MCP 进程管理自检 |
 | `scripts/test-mcp-web-search.mjs` | Web Search / Fetch MCP 自检（含内网拦截） |
 | `scripts/test-onebot-connection.mjs` | OneBot 连接自检 |
-| `scripts/send-test-group.mjs` | 向指定名称的群发测试消息 |
+| `scripts/test-no-group.mjs` | 「群聊已彻底移除、私聊不受影响」回归（起隔离实例 + 假 OneBot，灌群消息断言零影响） |
 | `scripts/check-onebot-status.mjs` | 网关状态 |
 | `npm run self-test` | DSH 侧链路自检（不依赖 QQ） |
 
@@ -333,13 +339,15 @@ restart.bat
 
 ### Q：活跃期回复不及时？
 
-- 群聊走轮询：`activeCheck` 10~30 秒 + `activeReplyDelay` 2~8 秒。
-- 调小这两个参数；私聊已改为即时投递。
+- 活跃期走轮询：`activeCheckMinMs~MaxMs`（检测新消息）+ `activeReplyDelayMinMs~MaxMs`（回复前延迟）。
+- 调小这两组参数即可更及时。
 
 ### Q：为什么有的消息没回？
 
-- 普通闲聊可能被 `skipProbability` 沉默（但会进 `silentContext`，下次投递模型能看到）。
-- 直接提问/@/私聊不会沉默。
+- 只处理**私聊**，且发送方必须命中 `allow.private`（或被 `allowAllWhenEmpty` 放行）；
+  **群消息一律忽略**，这是设计如此（群聊能力已移除）。
+- `reserved2` 模式下 AI 自主决定要不要回（可能选择潜水），可用 `qq_wait_for_messages` / `qq_mark_read` 观察。
+- 静默模式（`current-role.json` 的 `mode: "silent"`）下，非管理员私聊不投递给 agent。
 
 ### Q：为什么拆条有时不拆？
 

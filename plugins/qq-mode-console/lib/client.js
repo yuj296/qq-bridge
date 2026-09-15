@@ -25,7 +25,7 @@ window.__ModuleLoader__.load({
       notify: { title: "通知", desc: "什么情况下手机会收到消息 —— 嫌吵就调这几个阈值。" },
       allow: { title: "白名单（谁能跟它说话）", desc: "空白名单 + 放行开关关闭 = 谁都不理。黑名单优先于白名单。" },
       deny: { title: "黑名单", desc: "命中黑名单的会话一律不处理，优先级高于白名单。" },
-      slang: { title: "黑话学习", desc: "它会把群里看不懂的新词攒起来，够了就让 DSH 去研究并收录。" },
+      slang: { title: "黑话学习", desc: "它会把聊天里看不懂的新词攒起来，够了就让 DSH 去研究并收录。" },
       social: { title: "一代仿真（social）", desc: "早期模式：按概率决定要不要接话、要不要主动找人。" },
       socialV2: { title: "二代仿真（socialV2）", desc: "现在实际在用的模式 —— AI 自己决定什么时候说话、什么时候潜水。" },
       dsh: { title: "模型与 DSH 接线", desc: "机器人跑在哪个模型上、连的是哪个 DSH。" },
