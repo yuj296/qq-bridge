@@ -77,9 +77,9 @@ function yamlSingleQuote(s) {
 }
 
 /** profile patch 层里引用本地插件：file:// URL（跨盘也能用，不受相对路径限制）。 */
-function pluginSpecifier() {
-  const entry = path.join(REPO_ROOT, 'plugins', 'qq-mode-console', 'lib', 'index.js');
-  if (!fs.existsSync(entry)) fatal(`console plugin entry not found: ${entry}`);
+function pluginSpecifier(pluginDir, entryRel = 'lib/index.js') {
+  const entry = path.join(REPO_ROOT, 'plugins', pluginDir, entryRel);
+  if (!fs.existsSync(entry)) fatal(`plugin entry not found: ${entry}`);
   return pathToFileURL(entry).href;
 }
 
@@ -110,7 +110,15 @@ function patchBlock() {
   // 可选；不装也能用 —— 桥接自己的控制台（默认 127.0.0.1:3100）同样能切模式。
   out += `- insert:\n`;
   out += `    - id: qq-mode-console\n`;
-  out += `      name: ${yamlSingleQuote(pluginSpecifier())}\n`;
+  out += `      name: ${yamlSingleQuote(pluginSpecifier('qq-mode-console'))}\n`;
+  out += `      config: {}\n`;
+  // 唤醒按键插件：宿主侧注册 /api/qq-wake 路由，客户端侧在侧边栏「技能中心」下面
+  // 注入一个「唤醒」行。客户端半侧由 dsh-client-modules 从「挂载文件最近的
+  // package.json」里读 dsh.client 声明 + exports["./client"]，所以这里指向
+  // lib/index.js 就够了 —— 它会顺着目录找到 plugins/qq-wake/package.json。
+  out += `- insert:\n`;
+  out += `    - id: qq-wake\n`;
+  out += `      name: ${yamlSingleQuote(pluginSpecifier('qq-wake'))}\n`;
   out += `      config: {}\n`;
   out += `${END_MARKER}\n`;
   return out;

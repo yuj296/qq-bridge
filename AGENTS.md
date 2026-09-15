@@ -49,7 +49,10 @@ QQ 消息 → SnowLuma(OneBot v11) → 本桥接进程 → DSH 会话 → agent 
 | `src/dsh-client.0.1.1.js.bak` | 上游原文件（对照用，**不要改动、不要删**） | 永不 |
 | `src/mcp-*.js` | 三个 MCP server，作为子进程被 DSH 拉起 | 给 agent 加工具时 |
 | `dsh/agent-presets/qq-chat*/` | 两个 DSH agent preset（**安全边界在这**） | 改 agent 人格/权限时 |
-| `plugins/qq-mode-console/` | DSH 设置页的 `qq-mode` 卡片 | 改设置项时 |
+| `plugins/qq-mode-console/` | DSH 设置页的 `qq-mode` 卡片（host 插件） | 改设置项时 |
+| `plugins/qq-wake/` | **DSH 侧边栏「唤醒」按键**：host 路由 `/api/qq-wake/*` + client DOM 行 | 改唤醒行为时 |
+| `scripts/test-wake.mjs` | 唤醒流程自测（不经过 DSH，直接跑宿主侧逻辑） | — |
+| `scripts/test-wake-client.mjs` | 唤醒按键**客户端半侧**自测（jsdom 造仿 DSH 侧边栏） | — |
 | `tools/dsh-qq-bot.ps1` | 守护脚本（自启/自愈） | 改运维策略时 |
 | `scripts/setup-dsh.mjs` | DSH 端安装 | 安装流程变更时 |
 | `scripts/dsh-status.mjs` | 状态总览（**排查第一步**） | — |
@@ -152,11 +155,43 @@ node src/bridge.js          # 直接跑（前台）
 # 或双击 start.bat / restart.bat
 ```
 
-自启由 Windows 计划任务 **`DSH QQ Bot Supervisor`** 提供（登录时触发，
-跑 `tools/dsh-qq-bot.ps1`）。守护逻辑见 §7 与 `tools/README.md`。
+自启由 Windows 计划任务 **`DSH QQ Bot Supervisor`** 提供（跑 `tools/dsh-qq-bot.ps1`），
+**两个触发器缺一不可**：`登录时` + **`每 5 分钟看门狗`**（`-Once` + `RepetitionInterval PT5M`）。
+守护是常驻进程，而登录触发器一辈子只触发一次 —— 守护一旦被杀就永久缺席，
+所以看门狗是**唯一**的自动恢复手段（详见 `tools/README.md` 的「两个触发器」一节）。
+
+**判断守护活着没有，看心跳文件，不要看任务状态**：
+`state/supervisor/supervisor.heartbeat`（每 20s 刷新 `pid=… 时间`）。
+`Get-ScheduledTask` 的 `State` 会骗人（被杀后照样回到 `Ready`）。
 
 **改完 `config.json`、`bridge.js`、`dsh-client.js` 都必须重启桥接才生效**
 （守护脚本会在 ~20s 内自动拉起）。
+
+**注意 `bridge.log` 的时间戳是 UTC**（比本地时间少 8 小时），`supervisor.log` 是本地时间 ——
+对时间线时先换算，别以为桥接是几小时前死的。
+
+### 5.1 侧边栏「唤醒」按键（`plugins/qq-wake/`）
+
+DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把机器人拉起来 + 给管理员发一句
+『睡醒了』」。它是**双半侧插件**：
+
+| 半侧 | 文件 | 怎么被加载 |
+|---|---|---|
+| 宿主 | `lib/index.js` | 用户 patch 层的 `file://` 条目（同 `qq-mode-console`） |
+| 客户端 | `lib/client.js` | `dsh-client-modules` 从**挂载文件最近的 `package.json`** 里读 `dsh.client` + `exports["./client"]`，组进浏览器启动图 |
+
+要点（改这个插件前必读）：
+
+- **patch 层是 live reload 的**：改完 `setup-dsh.mjs` 重跑一遍、宿主路由立刻生效；
+  **但已经打开的页面要 F5 刷新一次**才会拉新的客户端启动图 —— 不需要重启 DSH。
+- **客户端半侧不是普通 ESM**：必须有 `window.__ModuleLoader__.load({id, factory})` 外壳，
+  `id` 等于包名，`factory` 返回 `module.exports` 并挂 `apply`/`inject`。
+- **客户端 `apply` 绝不能抛**（抛了整个 Web 外壳起不来）；本插件全部包在 try/catch 里。
+- **侧边栏没有对外 slot**：只能 DOM 注入 + MutationObserver 自愈，锚点是
+  `[data-dsh-skill-explorer-entry]`（技能中心那一行）。
+- **控制台令牌不下发到页面**：浏览器只跟同源的 `/api/qq-wake/*` 说话，宿主侧再带
+  `x-console-token` 去敲桥接控制台；路由有本机 + 同源信任围栏。
+- 细节与坑见 `plugins/qq-wake/README.md`。
 
 ---
 
@@ -164,12 +199,15 @@ node src/bridge.js          # 直接跑（前台）
 
 | 命令 | 验证什么 | 期望 |
 |---|---|---|
-| `node scripts/dsh-status.mjs` | DSH 侧状态：preset / 设置命名空间 / 插件清单 | 6 个 preset（含 `qq-chat*`）、命名空间含 `qq-mode`、四个 `qq-bridge` 插件 `active` |
+| `node scripts/dsh-status.mjs` | DSH 侧状态：preset / 设置命名空间 / 插件清单 | 6 个 preset（含 `qq-chat*`）、命名空间含 `qq-mode`、**五个** `qq-bridge` 插件 `active`（含 `qq-wake`） |
 | `node src/self-test.js` | DSH 链路（不发 QQ） | 打印 agent 回复、`exit 0` |
 | `node scripts/test-dsh-012.mjs` | 全链路：工作区/会话/prompt/事件流 | 收到 `turn/start`…`turn/end`，`exit 0` |
 | `node scripts/test-preset-012.mjs qq-chat` | preset 能否建会话并跑完回合 | `回合结束 reason = completed` |
 | `node scripts/test-dsh-question-012.mjs` | 提问 waterfall（**慢**，真实跑一轮 agent） | 收到 `question/requested` 并能作答 |
 | `node scripts/fake-onebot.mjs` | **无 QQ 也能端到端测桥接** | 注入私聊后打印桥接回发的消息 |
+| `node scripts/test-wake.mjs --status` | 侧边栏「唤醒」按键的宿主侧逻辑：守护/桥接/OneBot 登录态 | `awake: true`，`exit 0` |
+| `node scripts/test-wake.mjs --no-send` | 唤醒的**冷启动**链路（不发 QQ 消息） | 三步全 ✓，`exit 0` |
+| `node scripts/test-wake-client.mjs` | **客户端半侧**（jsdom 造仿 DSH 侧边栏）：行是否落在「技能中心」正下方、点击是否打唤醒路由、外壳未就绪时是否不抛 | 13 项全 ✓，`exit 0`（缺 jsdom 则跳过） |
 | `node scripts/scan-secrets.mjs` | **发布/提交前自检**：有没有把令牌、真实 QQ 号、本机路径写进会入库的文件 | `✅ 未发现敏感信息`，`exit 0` |
 
 **沙箱/CI 注意**：本机 PowerShell 管道捕获 `node` 输出会被沙箱拦（命名管道），
@@ -212,12 +250,15 @@ node src/bridge.js          # 直接跑（前台）
 
 | 症状 | 先看 | 大概率原因 |
 |---|---|---|
+| **什么都没启动（端口 5099/3000/3100 全不通），`supervisor.log` 只有一行 `守护启动` 之后没有下文** | `supervisor.heartbeat` 的时间戳走不走；任务的 `LastTaskResult` | 守护进程被杀（`0xC000013A` = 控制台关闭事件）→ 见 §5 与 `tools/README.md`「两个触发器」。看门狗 5 分钟内补位；`Start-ScheduledTask` 立刻恢复 |
 | 桥接起不来、报「已有一个实例在运行」 | `state/bridge.lock` | 重复启动；守护会清过期锁 |
 | `SnowLuma 连接断开（code=1006）` 刷屏 | 端口 3000/3001 | SnowLuma 的 QQ 会话掉了 → 见坑 1 |
 | OneBot 端口在听但 `/get_login_info` 超时 | SnowLuma 日志 `EPIPE` | 注入管道断了；重启 SnowLuma（**不用重扫码**） |
 | agent 收到消息但不回 | `state/bridge.log` | 模式是 `reserved2`（AI 自主决定/走工具），或 preset 未安装 |
 | 回复没转发到 QQ | 日志找 `turn/end` | 见 §3.4 第一条（`turn/start` 缺失） |
 | 审批没到手机 | `relayApprovalsToOwner` | 或该会话被映射到了别的 QQ 会话 |
+| 侧边栏**没有「唤醒」按键** | 页面是否刷新过（F5）；`/api/qq-wake/status` 是否 200 | 插件挂了但页面是旧的 → 刷新即可；路由也 404 则是 patch 层没挂上（重跑 `setup-dsh.mjs`） |
+| 点唤醒报「唤醒失败」 | tooltip 里那几行步骤 | 多半是 QQ 客户端没开/没登录（SnowLuma 注入不了），或桥接 60s 内没起来 |
 | DSH 启动报 `cannot resolve profile bundle` | `profiles/*/cordis.patch.yml` | 是**旧版脚本**残留；见 `PORTING-DSH-0.1.2.md` §6 |
 
 统一入口：**`state/supervisor/supervisor.log`** + `tools/README.md` 的故障速查表。
@@ -234,6 +275,12 @@ node src/bridge.js          # 直接跑（前台）
 - **不要**在发给管理员的审批里做敏感信息脱敏（会把目标路径藏掉，等于让用户闭眼批权限）；
   群聊等其它会话仍应照常审计。
 - **不要**用 `process.exit()` 替代 `exitCleanly()`。
+- **不要**把带客户端半侧的插件入口写成仓库里的散文件 —— `dsh-client-modules` 是
+  从「挂载文件**最近的 `package.json`**」里读 `dsh.client` 声明的，散文件找不到声明，
+  按键就永远不出现。必须挂在插件包自己的目录里（见 §5.1）。
+- **不要在客户端半侧（`lib/client.js`）里抛异常**：客户端插件 apply 抛出会让整个
+  Web 外壳启动失败。
+- **不要**把桥接控制台令牌（`state/console-token`）下发到浏览器；一律由宿主半侧代发。
 - **不要**把 `config.json`、`state/`、令牌、QQ 号写进仓库或文档。
 
 ---

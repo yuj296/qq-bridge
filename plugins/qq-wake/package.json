@@ -1,0 +1,22 @@
+{
+  "name": "qq-wake",
+  "version": "0.1.0",
+  "description": "DSH 侧边栏「唤醒」按键：拉起 QQ 机器人（SnowLuma + qq-bridge）并给管理员发一句「睡醒了」",
+  "type": "module",
+  "main": "./lib/index.js",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  }
+}

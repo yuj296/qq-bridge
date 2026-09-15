@@ -25,7 +25,32 @@
 连续 3 次探活失败时，判定为「QQ 客户端重启把注入管道搞断了」，
 自动重启 SnowLuma 并连带重启桥接。登录态存在 SnowLuma 本地，**不需要重新扫码**。
 
-进程 PID 记在 `state/supervisor/*.pid`，日志在 `state/supervisor/supervisor.log`（超过 1MB 自动截断）。
+进程 PID 记在 `state/supervisor/*.pid`，日志在 `state/supervisor/supervisor.log`（超过 1MB 自动截断），
+**心跳**在 `state/supervisor/supervisor.heartbeat`（每轮刷新一行 `pid=… 时间`）。
+
+## 两个触发器（**别只留登录那一个**）
+
+| 触发器 | 作用 |
+|---|---|
+| 登录时 | 正常启动路径 |
+| **每 5 分钟（看门狗）** | 守护被杀后自动补位 |
+
+守护是**常驻进程**，而「登录时」**一辈子只触发一次**。实测踩过的坑：
+开机时（本次是开机后 19 秒）任务被拉起，脚本只写了第一行 `守护启动：…` 就没了下文 ——
+守护进程被**控制台关闭事件**杀掉，`powershell.exe` 以 `0xC000013A`
+（`STATUS_CONTROL_C_EXIT`）退出，任务回到 `Ready`，`LastTaskResult=0xC000013A`。
+只有登录触发器时，接下来**直到下次登录都不会再有任何尝试** ——
+表现就是「软件根本没启动」，而且日志里只留一行，看起来像是没跑过。
+
+加了 5 分钟看门狗后：配合 `MultipleInstances=IgnoreNew`，守护活着时这次触发是空转
+（`LastTaskResult=0x800710E0` = `ERROR_REQUEST_REFUSED`，**正常现象**），
+死了才会真正补位，最长停摆 5 分钟。
+
+**判断守护到底死没死，看心跳文件，不要看任务状态**：
+
+```powershell
+Get-Content D:\dk\qq-bridge\state\supervisor\supervisor.heartbeat   # 时间戳在走就是活着
+```
 
 ## 常用命令
 
@@ -72,6 +97,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\uninstall-task.ps1
 
 | 症状 | 原因 / 处理 |
 |---|---|
+| **机器人完全没启动，日志只有一行 `守护启动：…` 后面就没有了** | 守护进程在启动后被杀（`LastTaskResult=0xC000013A`）。看门狗会在 5 分钟内补位；想立刻恢复用 `Start-ScheduledTask`。看 `supervisor.heartbeat` 确认是否活着 |
 | 日志刷 `未检测到 QQ.exe … 暂停守护` | QQ 客户端没开。开起来即可 |
 | 日志反复 `OneBot 接口无响应` 且 SnowLuma 启动后没有任何 `Hook` 行 | QQ 客户端开着但**没登录**，或 `hookAutoLoad` 是 false。先确认登录，再确认 autoload |
 | 日志出现 `已连续重启 N 次仍未恢复…暂停 10 分钟` | 上面两种情况之一。修好后守护会在下一轮自动恢复（或手动重启任务） |

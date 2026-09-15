@@ -38,7 +38,7 @@ if (asJson) {
   if (Array.isArray(entries)) {
     console.log(`  共 ${entries.length} 个条目；下面是 qq-bridge 相关与未启用的：`);
     for (const e of entries) {
-      const mine = /qq-mode|snowluma|web-search-safe|mcp-client/i.test(String(e.moduleName ?? '') + String(e.entryId ?? ''));
+      const mine = /qq-mode|qq-wake|snowluma|web-search-safe|mcp-client/i.test(String(e.moduleName ?? '') + String(e.entryId ?? ''));
       if (!mine && e.enabled !== false) continue;
       const flag = e.enabled === false ? '❌未启用' : `✅${e.fiberPhase ?? ''}`;
       console.log(`  ${flag.padEnd(12)} ${String(e.entryId).padEnd(28)} ${e.moduleName}`);

@@ -33,6 +33,9 @@ $StateDir = Join-Path $BridgeDir 'state\supervisor'
 $LogFile  = Join-Path $StateDir 'supervisor.log'
 $SnowLumaPidFile = Join-Path $StateDir 'snowluma.pid'
 $BridgePidFile   = Join-Path $StateDir 'bridge.pid'
+# 心跳文件：每次轮询都刷新。判断「守护进程还活着吗」看它就够了 ——
+# 计划任务里的 State=Running 不可靠（进程被控制台关闭事件杀掉时任务会回到 Ready）。
+$HeartbeatFile   = Join-Path $StateDir 'supervisor.heartbeat'
 
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
@@ -156,6 +159,7 @@ $startedAt = Get-Date
 
 while ($true) {
   try {
+    try { Set-Content -Path $HeartbeatFile -Value ("pid=$PID {0}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) -Encoding ASCII } catch {}
     $dsh = Get-Process -Name $DshProcessName -ErrorAction SilentlyContinue
 
     if (-not $dsh) {
