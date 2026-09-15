@@ -1,13 +1,25 @@
 {
   "name": "qq-mode-console",
-  "version": "0.1.0",
-  "description": "QQ bridge mode console for DeepSeek Harness settings UI (chat / closed-agent / reserved / reserved2)",
+  "version": "0.2.0",
+  "description": "QQ 机器人设置：把 qq-bridge 的 config.json 开放成 DSH 设置页里的一张卡片（host 注册 settings 命名空间 + client 渲染表单）",
   "type": "module",
   "main": "./lib/index.js",
   "license": "MIT",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "dependencies": {

@@ -17,6 +17,7 @@ import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import { safeFetchBuffer, validateFetchUrl, looksLikeImageBuffer } from './safe-fetch.js';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
+import { applyOverrides } from './settings-merge.js';
 import {
   loadSlang,
   saveSlang,
@@ -1281,21 +1282,62 @@ async function main() {
 
   // 从 DSH settings 读取桥接模式；命名空间未注册时回退本地 state/mode.json
   const VALID_MODES = ['chat', 'closed-agent', 'reserved', 'reserved2'];
+  // DSH 设置页只覆盖「用户显式改过的字段」（命名空间的 user 层）。
+  // 千万别用解析后的整值（base+user）—— base 是 DSH 启动那一刻的 config.json 快照，
+  // 拿它整体覆盖会把运行期间由控制台改的配置在 5 秒后改回去。详见 src/settings-merge.js。
+  const SETTINGS_HANDLED = new Set(['mode', 'ownerQQ']);
+  /** 上一轮由设置页施加过的叶子路径（用来识别"用户在设置页里撤销了某一项"）。 */
+  let settingsApplied = new Set();
+  /** 把设置页的 user 层合并进运行中的 cfg。 */
+  function applySettingsOverrides(userLayer) {
+    const rest = {};
+    for (const [key, item] of Object.entries(userLayer)) {
+      if (!SETTINGS_HANDLED.has(key)) rest[key] = item;
+    }
+    let result;
+    try {
+      result = applyOverrides({
+        target: cfg,
+        user: rest,
+        applied: settingsApplied,
+        freshConfig: readJsonSafe(path.join(ROOT, 'config.json'), null)   // 撤销时拿磁盘上的值还原
+      });
+    } catch (error) {
+      log(`应用 DSH 设置覆盖失败（已忽略本轮）: ${error?.message ?? error}`);
+      return;
+    }
+    settingsApplied = result.applied;
+    if (result.changed.length > 0) {
+      const preview = result.changed.slice(0, 6).join(', ');
+      log(`已从 DSH 设置页应用 ${result.changed.length} 项配置：${preview}${result.changed.length > 6 ? ` 等 ${result.changed.length} 项` : ''}`);
+      log('提示：控制台端口 / SnowLuma 地址这类接线项需要重启桥接才生效');
+    }
+    if (result.revoked.length > 0) {
+      log(`设置页里撤销了 ${result.revoked.length} 项，已还原成 config.json 的值`);
+    }
+  }
   async function refreshMode() {
     try {
       const s = unwrap(await api.settings.describe({}), 'settings.describe');
       const ns = s.namespaces.find((n) => n.ns === 'qq-mode');
-      if (ns?.value && typeof ns.value.mode === 'string' && VALID_MODES.includes(ns.value.mode)) {
-        currentMode = ns.value.mode;
+      // ns.user = 用户真正改过的字段；ns.value 是 base+user（base = config.json 快照），
+      // 只认 user 层，控制台/手改 config.json 才不会被悄悄覆盖。
+      const overrides = ns?.user && typeof ns.user === 'object' ? ns.user : null;
+      if (overrides) {
+        if (typeof overrides.mode === 'string' && VALID_MODES.includes(overrides.mode)) {
+          currentMode = overrides.mode;
+        }
         // DSH 设置页也可配置管理员 QQ；未设置该字段时不覆盖 config.json。
-        if (ns.value.ownerQQ !== undefined) {
+        if (overrides.ownerQQ !== undefined) {
           try {
-            cfg.ownerQQ = normalizeOwnerQQ(ns.value.ownerQQ);
+            const normalized = normalizeOwnerQQ(overrides.ownerQQ);
+            if (normalized !== cfg.ownerQQ) cfg.ownerQQ = normalized;
           } catch (error) {
             log(`DSH settings ownerQQ 无效，已忽略: ${error?.message ?? error}`);
           }
         }
-        return;
+        applySettingsOverrides(overrides);
+        if (typeof overrides.mode === 'string' && VALID_MODES.includes(overrides.mode)) return;
       }
     } catch {}
     const local = readJsonSafe(path.join(STATE_DIR, 'mode.json'), null);

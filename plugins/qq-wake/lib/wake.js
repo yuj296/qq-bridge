@@ -1,19 +1,23 @@
 // qq-wake —— 唤醒流程（纯逻辑，宿主侧插件与独立测试脚本共用）
 //
-// 一次「唤醒」= 把 QQ 机器人整条链路拉起来，然后给管理员发一句话。
+// 一次「唤醒」= 点一下按键，把 QQ 机器人整条链路拉起来，然后给管理员发一句话。
 //
-//   计划任务守护进程 → SnowLuma（注入 QQ.exe）→ OneBot HTTP → qq-bridge → QQ 私聊
+//   SnowLuma（注入 QQ.exe）→ OneBot HTTP → qq-bridge → QQ 私聊
+//
+// **没有自动启动**：不注册计划任务、不开机自启、不做常驻守护。
+// 机器人只在「点唤醒」时被拉起 —— 这是用户的明确要求（见 AGENTS.md §5）。
 //
 // 为什么这些逻辑必须在宿主侧（DSH Node 进程）而不是浏览器里：
 //   1. 桥接控制台令牌（state/console-token）不能下发到页面；
 //   2. 浏览器直连 127.0.0.1:3100 是跨源，会被桥接的 Origin 校验拒掉；
-//   3. 机器完全没起来时浏览器无能为力 —— 必须有进程能去把守护拉起来。
+//   3. 机器完全没起来时浏览器无能为力 —— 必须有进程能去把两个 node 进程拉起来。
 //
 // 本文件不 import 任何 DSH 包，所以可以被 scripts/test-wake.mjs 单独跑。
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import net from 'node:net';
+import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -21,8 +25,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** qq-bridge 仓库根目录（本文件在 <root>/plugins/qq-wake/lib/ 下）。 */
 export const BRIDGE_DIR = path.resolve(__dirname, '..', '..', '..');
 
-/** 计划任务名（tools/install-task.ps1 注册的那个）。 */
-export const SUPERVISOR_TASK = 'DSH QQ Bot Supervisor';
+/** SnowLuma 安装目录（可用插件 config.snowlumaDir 覆盖）。 */
+export const DEFAULT_SNOWLUMA_DIR = 'C:\\SnowLuma';
+
+/** SnowLuma WebUI 端口（用它判断进程起没起来）。 */
+const SNOWLUMA_PORT = 5099;
 
 /** 默认唤醒语。可用插件 config.message 覆盖。 */
 export const DEFAULT_MESSAGE = '睡醒了';
@@ -60,7 +67,10 @@ export function readConsoleToken(bridgeDir = BRIDGE_DIR) {
   }
 }
 
-/** 守护进程心跳是否新鲜（守护每 20s 刷一次；判死活只看它，不看计划任务状态）。 */
+/**
+ * 守护心跳（tools/ 里的自启守护是可选项，默认不装）。
+ * 现在机器人由「唤醒」按键按需拉起，心跳只作为参考信息。
+ */
 export function readHeartbeat(bridgeDir = BRIDGE_DIR, freshMs = 90000) {
   const file = path.join(bridgeDir, 'state', 'supervisor', 'supervisor.heartbeat');
   try {
@@ -72,12 +82,133 @@ export function readHeartbeat(bridgeDir = BRIDGE_DIR, freshMs = 90000) {
   }
 }
 
-// ── 探活 ────────────────────────────────────────────────────────────────────
+// ── 进程/端口小工具 ─────────────────────────────────────────────────────────
 
-/** fetch 失败时给一句能看懂的原因（ECONNREFUSED 比 "TypeError" 有用得多）。 */
-function describeFetchError(error) {
-  return error?.cause?.code ?? error?.cause?.message ?? error?.name ?? String(error);
+/** 找 node 可执行文件：系统 node 优先，否则用当前进程那个（DSH 自带的也能跑）。 */
+function resolveNodeExe() {
+  const system = 'C:\\Program Files\\nodejs\\node.exe';
+  if (fs.existsSync(system)) return system;
+  return process.execPath;
 }
+
+/** 读 pid 文件里的 pid（不存在/非法返回 0）。 */
+function readPidFile(file) {
+  try {
+    const pid = Number.parseInt(fs.readFileSync(file, 'utf8').trim(), 10);
+    return Number.isFinite(pid) && pid > 0 ? pid : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** 进程还活着吗。 */
+function isAlive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 端口在监听吗。 */
+function portOpen(port, timeoutMs = 800) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port });
+    const finish = (value) => {
+      socket.destroy();
+      resolve(value);
+    };
+    socket.setTimeout(timeoutMs, () => finish(false));
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+  });
+}
+
+/**
+ * 后台启动一个 node 脚本并记下 pid。
+ * detached + unref：DSH 关掉后这两个进程继续跑，下次唤醒会复用它们。
+ *
+ * 注意两个坑：
+ *   * `spawn` 失败（node.exe 路径不存在等）是**异步** emit 'error' 的，
+ *     没有监听器时 Node 会抛未捕获异常 —— 那是把 DSH harness 整个搞崩。
+ *     所以这里先同步检查可执行文件存在，再挂一个 error 监听兜底。
+ *   * 拿不到 pid 时不写 pid 文件（写 "undefined" 会让下次唤醒读到脏值）。
+ * @returns {number} 子进程 pid，起不来时返回 0。
+ */
+function spawnDetached(nodeExe, script, cwd, pidFile, log) {
+  if (!fs.existsSync(nodeExe)) {
+    log(`找不到 node 可执行文件：${nodeExe}`);
+    return 0;
+  }
+  let child;
+  try {
+    child = spawn(nodeExe, [script], {
+      cwd,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
+    });
+  } catch (error) {
+    log(`启动 ${path.basename(script)} 失败：${error?.message ?? error}`);
+    return 0;
+  }
+  child.on('error', (error) => {
+    log(`启动 ${path.basename(script)} 出错：${error?.message ?? error}`);
+  });
+  child.unref();
+  if (!child.pid) {
+    log(`启动 ${path.basename(script)} 失败：没有拿到进程号`);
+    return 0;
+  }
+  try {
+    fs.mkdirSync(path.dirname(pidFile), { recursive: true });
+    fs.writeFileSync(pidFile, String(child.pid), 'ascii');
+  } catch {}
+  log(`已启动 ${path.basename(script)}（PID=${child.pid}）`);
+  return child.pid;
+}
+
+/** 这个 pid 现在真的是 node 进程吗（Windows 上问 tasklist；防止 pid 复用误杀）。 */
+function isNodeProcess(pid) {
+  try {
+    const out = execFileSync('tasklist.exe', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+      windowsHide: true,
+      timeout: 8000,
+      encoding: 'buffer'
+    });
+    let text_;
+    try { text_ = new TextDecoder('gbk').decode(out); } catch { text_ = String(out); }
+    return /node\.exe/i.test(text_);
+  } catch {
+    return false;   // 问不出来就当作"不是"，宁可不杀
+  }
+}
+
+/**
+ * 停掉 pid 文件里记着的进程。
+ * 只动「我们自己启动过、而且现在确实还是 node」的那个 —— pid 文件可能很旧，
+ * 而 pid 会被系统复用，直接 kill 可能杀掉你别的程序。
+ */
+function killTracked(pidFile, log, label) {
+  const pid = readPidFile(pidFile);
+  if (!pid || !isAlive(pid)) return false;
+  if (!isNodeProcess(pid)) {
+    log(`${label} 的 pid 文件已过期（PID=${pid} 现在不是 node 进程），跳过，不清 PID 文件`);
+    return false;
+  }
+  try {
+    process.kill(pid);
+    log(`${label}（PID=${pid}）已停止，准备重启`);
+    return true;
+  } catch (error) {
+    log(`停止 ${label} 失败：${error?.message ?? error}`);
+    return false;
+  }
+}
+
+// ── 探活 ────────────────────────────────────────────────────────────────────
 
 /** 带超时的 fetch（避免探活把唤醒流程卡死）。 */
 async function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
@@ -88,6 +219,11 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** fetch 失败时给一句能看懂的原因（ECONNREFUSED 比 "TypeError" 有用得多）。 */
+function describeFetchError(error) {
+  return error?.cause?.code ?? error?.cause?.message ?? error?.name ?? String(error);
 }
 
 /**
@@ -154,34 +290,14 @@ export async function probeStatus(bridgeDir = BRIDGE_DIR) {
   };
 }
 
-// ── 唤醒 ────────────────────────────────────────────────────────────────────
-
-/** 让计划任务把守护进程拉起来（已在运行/被 IgnoreNew 拒绝都算正常，后面靠探活判定）。 */
-function startSupervisorTask() {
-  return new Promise((resolve) => {
-    if (process.platform !== 'win32') return resolve({ ok: false, detail: '非 Windows，跳过计划任务拉起' });
-    execFile('schtasks.exe', ['/run', '/tn', SUPERVISOR_TASK], { windowsHide: true, encoding: 'buffer' }, (error, stdout, stderr) => {
-      // schtasks 在中文系统上吐 GBK，按 UTF-8 读会变乱码 —— 用 gbk 解一次
-      const decode = (buf) => {
-        if (!buf || buf.length === 0) return '';
-        try { return new TextDecoder('gbk').decode(buf).trim(); } catch { return String(buf).trim(); }
-      };
-      const text = `${decode(stdout)} ${decode(stderr)}`.trim();
-      const alreadyRunning = /已在运行|currently running|已经运行/i.test(text);
-      if (error) return resolve({ ok: false, alreadyRunning, detail: text || `schtasks 失败：${error.message}` });
-      resolve({ ok: true, alreadyRunning, detail: text || '已请求启动守护任务' });
-    });
-  });
-}
+// ── 拉起链路 ────────────────────────────────────────────────────────────────
 
 /** 轮询直到 test() 返回 ok，或超时。 */
 async function waitFor(test, { timeoutMs, intervalMs = 2000, onWait }) {
-  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
   let last = await test();
-  let tick = 0;
-  while (!last.ok && Date.now() < deadline) {
-    if (onWait && tick % 5 === 0) onWait(last, Date.now() - (deadline - timeoutMs));
-    tick += 1;
+  while (!last.ok && Date.now() - startedAt < timeoutMs) {
+    if (onWait) onWait(last, Date.now() - startedAt);
     await sleep(intervalMs);
     last = await test();
   }
@@ -189,22 +305,113 @@ async function waitFor(test, { timeoutMs, intervalMs = 2000, onWait }) {
 }
 
 /**
- * 跑一次唤醒：确保机器人起来 → 发消息。
+ * 确保 SnowLuma 起来且 OneBot 可用（OneBot 可用 == 注入成功且 QQ 已登录）。
+ * @returns {Promise<{ok: boolean, started: boolean, detail: string, login?: object}>}
+ */
+async function ensureSnowLuma(cfg, { snowlumaDir, timeoutMs, log }) {
+  const onebot = await probeOneBot(cfg);
+  if (onebot.ok) return { ok: true, started: false, detail: '已在运行', login: onebot.login };
+
+  const entry = path.join(snowlumaDir, 'index.mjs');
+  if (!fs.existsSync(entry)) {
+    return {
+      ok: false,
+      started: false,
+      detail: `找不到 ${entry}（SnowLuma 装在别处？可用插件 config.snowlumaDir 指定）`
+    };
+  }
+
+  // 端口在听但 OneBot 不通 = 注入管道断了（QQ 客户端重启过）。
+  // 只能重启 SnowLuma；但只动「我们自己启动过的那一个」，不去杀别人的进程。
+  const pidFile = path.join(BRIDGE_DIR, 'state', 'supervisor', 'snowluma.pid');
+  if (await portOpen(SNOWLUMA_PORT)) {
+    if (!killTracked(pidFile, log, 'SnowLuma')) {
+      return {
+        ok: false,
+        started: false,
+        detail: '端口 5099 被占用但 OneBot 不响应，而且那不是本插件启动的进程 —— 请手动重启 SnowLuma'
+      };
+    }
+    for (let i = 0; i < 20 && (await portOpen(SNOWLUMA_PORT)); i += 1) await sleep(500);
+  }
+
+  const pid = spawnDetached(resolveNodeExe(), entry, snowlumaDir, pidFile, log);
+  if (pid === 0) return { ok: false, started: false, detail: 'SnowLuma 启动失败（node 起不来，见桥接/DSH 日志）' };
+  const ready = await waitFor(() => probeOneBot(cfg), {
+    timeoutMs,
+    onWait: (last, waited) => log(`等待 SnowLuma 注入 QQ… ${Math.round(waited / 1000)}s（${last.error}）`)
+  });
+  if (!ready.ok) {
+    return { ok: false, started: true, detail: `SnowLuma 起来了但 OneBot 没通：${ready.error}` };
+  }
+  return { ok: true, started: true, detail: '已启动并登录', login: ready.login };
+}
+
+/**
+ * 确保 qq-bridge 起来（必须在 OneBot 可用之后 —— 桥接连不上 SnowLuma 会直接退出）。
+ * @returns {Promise<{ok: boolean, started: boolean, detail: string}>}
+ */
+async function ensureBridge(cfg, { bridgeDir, timeoutMs, log }) {
+  const current = await probeBridge(cfg, bridgeDir);
+  if (current.ok) return { ok: true, started: false, detail: '已在运行' };
+
+  const entry = path.join(bridgeDir, 'src', 'bridge.js');
+  if (!fs.existsSync(entry)) return { ok: false, started: false, detail: `找不到 ${entry}` };
+
+  const pidFile = path.join(bridgeDir, 'state', 'supervisor', 'bridge.pid');
+  const pid = spawnDetached(resolveNodeExe(), entry, bridgeDir, pidFile, log);
+  if (pid === 0) return { ok: false, started: false, detail: '桥接启动失败（node 起不来，见 DSH 日志）' };
+  const ready = await waitFor(() => probeBridge(cfg, bridgeDir), {
+    timeoutMs,
+    onWait: (last, waited) => log(`等待桥接控制台… ${Math.round(waited / 1000)}s（${last.error}）`)
+  });
+  return ready.ok
+    ? { ok: true, started: true, detail: '已启动' }
+    : { ok: false, started: true, detail: `桥接没起来：${ready.error ?? '超时'}` };
+}
+
+// ── 唤醒 ────────────────────────────────────────────────────────────────────
+
+/**
+ * 跑一次唤醒：拉起机器人 → 发消息。
+ *
+ * **同一时刻只跑一次**：并发调用（连点按键、两个页面同时点）直接复用同一次流程的结果。
+ * 否则两路会同时看到「SnowLuma 没在跑」→ 各起一个，端口打架、QQ 被重复注入。
+ *
+ * @param {object} [options] 见 {@link runWakeOnce}。
+ * @returns {Promise<object>} 同一次唤醒的结果。
+ */
+export function runWake(options = {}) {
+  if (inFlightWake !== null) {
+    options.log?.('已有一次唤醒在进行中，这次直接复用它的结果');
+    return inFlightWake;
+  }
+  inFlightWake = runWakeOnce(options).finally(() => { inFlightWake = null; });
+  return inFlightWake;
+}
+
+/** 正在进行的唤醒（单飞锁）。 */
+let inFlightWake = null;
+
+/**
+ * 唤醒流程本体（只被 {@link runWake} 调用）。
  *
  * @param {object} [options]
  * @param {boolean} [options.send] 是否真的发消息（false 只把链路拉起来，用于自测）。
  * @param {string} [options.message] 唤醒语，默认「睡醒了」。
  * @param {number} [options.timeoutMs] 每段等待的上限。
  * @param {string} [options.bridgeDir] 仓库根目录。
+ * @param {string} [options.snowlumaDir] SnowLuma 目录，默认 C:\SnowLuma。
  * @param {(line: string) => void} [options.log] 过程日志回调。
  * @returns {Promise<{ok: boolean, message: string, steps: object[], login?: object, error?: string}>}
  */
-export async function runWake(options = {}) {
+async function runWakeOnce(options = {}) {
   const {
     send = true,
     message,
     timeoutMs = 240000,
     bridgeDir = BRIDGE_DIR,
+    snowlumaDir = DEFAULT_SNOWLUMA_DIR,
     log = () => {}
   } = options;
   const text = String(message ?? DEFAULT_MESSAGE).trim() || DEFAULT_MESSAGE;
@@ -213,55 +420,32 @@ export async function runWake(options = {}) {
   const cfg = readBridgeConfig(bridgeDir);           // 配置读不到就直接抛，调用方转成 500
   const ownerQQ = Number(cfg?.ownerQQ ?? 0);
 
-  // ── 1. 桥接控制台 ──
-  let bridge = await probeBridge(cfg, bridgeDir);
-  if (bridge.ok) {
-    steps.push({ name: 'qq-bridge', ok: true, detail: '已在运行' });
-  } else {
-    log(`桥接未运行（${bridge.error}），请求计划任务拉起守护进程…`);
-    const started = await startSupervisorTask();
-    // 「已在运行」说明守护本来就活着，只是桥接还没起来 —— 不是失败
-    steps.push({
-      name: '拉起守护任务',
-      ok: started.ok || started.alreadyRunning === true,
-      detail: started.alreadyRunning ? '守护任务已在运行' : started.detail
-    });
-    bridge = await waitFor(() => probeBridge(cfg, bridgeDir), {
-      timeoutMs,
-      onWait: (last, waitedMs) => log(`等待桥接控制台… ${Math.round(waitedMs / 1000)}s（${last.error}）`)
-    });
-    steps.push({ name: 'qq-bridge', ok: bridge.ok, detail: bridge.ok ? '已就绪' : (bridge.error ?? '超时') });
-    if (!bridge.ok) {
-      return { ok: false, error: `桥接没起来：${bridge.error ?? '超时'}`, message: text, steps };
-    }
-  }
-
-  // ── 2. OneBot（= SnowLuma 注入成功且 QQ 已登录）──
-  let onebot = await probeOneBot(cfg);
-  if (!onebot.ok) {
-    log(`OneBot 尚未就绪（${onebot.error}），等待 SnowLuma 注入 QQ 客户端…`);
-    onebot = await waitFor(() => probeOneBot(cfg), {
-      timeoutMs,
-      onWait: (last, waitedMs) => log(`等待 OneBot… ${Math.round(waitedMs / 1000)}s（${last.error}）`)
-    });
-  }
-  if (!onebot.ok) {
-    steps.push({ name: 'QQ 登录', ok: false, detail: onebot.error ?? '超时' });
+  // ── 1. SnowLuma + QQ 登录（OneBot 可用 == 注入成功且已登录）──
+  const snow = await ensureSnowLuma(cfg, { snowlumaDir, timeoutMs, log });
+  const snowDetail = snow.ok && snow.started
+    ? `${snow.detail}：${String(snow.login?.nickname ?? '机器人')}（${String(snow.login?.user_id ?? '?')}）`
+    : snow.detail;
+  steps.push({ name: 'SnowLuma / QQ 登录', ok: snow.ok, detail: snowDetail });
+  if (!snow.ok) {
     return {
       ok: false,
-      error: `QQ 没登录上：${onebot.error ?? '超时'}（SnowLuma 是注入式的，需要 QQ 客户端开着并已登录）`,
+      error: `QQ 没登录上：${snow.detail}（SnowLuma 是注入式的，需要 QQ 客户端开着并已登录）`,
       message: text,
       steps
     };
   }
-  const nickname = String(onebot.login?.nickname ?? '').trim();
-  const botQQ = String(onebot.login?.user_id ?? '').trim();
-  steps.push({ name: 'QQ 登录', ok: true, detail: `${nickname || '机器人'}（${botQQ}）` });
+
+  // ── 2. qq-bridge ──
+  const bridge = await ensureBridge(cfg, { bridgeDir, timeoutMs, log });
+  steps.push({ name: 'qq-bridge', ok: bridge.ok, detail: bridge.detail });
+  if (!bridge.ok) {
+    return { ok: false, error: bridge.detail, message: text, steps };
+  }
 
   // ── 3. 发唤醒语 ──
   if (!send) {
     steps.push({ name: '发送消息', ok: true, detail: '已跳过（--no-send）' });
-    return { ok: true, message: text, steps, login: onebot.login, skippedSend: true };
+    return { ok: true, message: text, steps, login: snow.login, skippedSend: true };
   }
   if (!Number.isFinite(ownerQQ) || ownerQQ <= 0) {
     steps.push({ name: '发送消息', ok: false, detail: 'config.json 没配 ownerQQ' });
@@ -284,7 +468,7 @@ export async function runWake(options = {}) {
     }
     steps.push({ name: '发送消息', ok: true, detail: `已发到 ${ownerQQ}：${text}` });
     log(`已发送：${text}`);
-    return { ok: true, message: text, steps, login: onebot.login, messageId: body?.message_id };
+    return { ok: true, message: text, steps, login: snow.login, messageId: body?.message_id };
   } catch (error) {
     steps.push({ name: '发送消息', ok: false, detail: String(error?.message ?? error) });
     return { ok: false, error: `发送失败：${error?.message ?? error}`, message: text, steps };

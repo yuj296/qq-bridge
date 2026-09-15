@@ -1,5 +1,8 @@
 # QQ ↔ DeepSeek Harness 桥接
 
+**原作者：[Derpyu520](https://github.com/Derpyu520)** —— 上游原仓库：[**Derpyu520/qq-bridge**](https://github.com/Derpyu520/qq-bridge)
+**本仓库**是由 [yuj296](https://github.com/yuj296) 维护的 fork（**DSH 0.1.2 适配版**），在上游基础上做协议移植与功能增强；代码与署名的功劳首先归原作者，本 fork 只做增量。
+
 > ## ⚠️ 这是 **DSH 0.1.2 适配版（Fork）**
 >
 > 本仓库 fork 自 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge)，在其基础上做了
@@ -28,6 +31,21 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
                                                 ▲                      │
                                                 └── agent 回复/提问/审批 ┘
 ```
+
+## 本 Fork 做了什么（相对上游原版）
+
+> 上游原版是完好的项目，下面只是记录这个 fork 的**增量**；协议移植部分的实测证据都在
+> [`PORTING-DSH-0.1.2.md`](PORTING-DSH-0.1.2.md)。
+
+| 增量 | 说明 | 主要位置 |
+| --- | --- | --- |
+| **DSH 0.1.2 协议移植** | 上游依赖 `@deepseek-ai/dsh-host-apiproxy`（该包在 DSH 0.1.2-alpha.1 被官方删除），**原版在新 DSH 上完全连不上**；本 fork 重写了客户端：`?token=` 换 cookie 鉴权、令牌/端口自动发现、`$events` waterfall 回执、`session/follow` 多路复用作事件流 | `src/dsh-client.js`、`PORTING-DSH-0.1.2.md` |
+| **设置页「QQ 机器人」分区** | DSH 设置左边导航里「通用设置」正下方新增一个分区，把 **156 项配置**按 10 组摊开（基本 / 通知 / 白名单 / 黑名单 / 安全 / 黑话学习 / 一代仿真 / 二代仿真 / 模型 / SnowLuma 接线），每项带一段中文说明；保存后桥接 **5 秒内生效**。优先级：**设置页改过的字段 > `config.json`（磁盘）= 桥接控制台改的值 > 代码默认值**，没动过的字段一个字都不碰；点重置即回磁盘值 | `plugins/qq-mode-console/` |
+| **侧边栏「唤醒」按键** | 「技能中心」正下方一行，点一下＝拉起 SnowLuma + 桥接，并给管理员 QQ 发一句「睡醒了」；失败时按钮 tooltip 会显示卡在哪一步。路由只收**本机同源**请求（信任围栏按 IP 字面量严格解析，控制台令牌不下发到页面） | `plugins/qq-wake/` |
+| **审批与任务完成通知上手机** | agent 索要权限时把审批转发到管理员 QQ，回「通过 / 拒绝」即决策；跑够时长（默认 **5 分钟**）的回合结束后推一条完成通知，阈值与开关都能在设置页调 | `src/bridge.js`、`relayApprovalsToOwner` / `notifyTaskDone*` |
+| **可选自启守护（默认不装）** | `tools/` 下是一套「计划任务 + 5 分钟看门狗 + 心跳文件」的守护方案，`tools/install-task.ps1` 一键装。**默认不注册任何计划任务**：机器人平时不动，只在点「唤醒」时起来 | `tools/README.md` |
+| **给 AI 代理的项目说明** | 文件地图、数据流不变量、14 条已知坑、改动约束、验证清单 —— 一个没有上下文的代理读完就能上手 | [`AGENTS.md`](AGENTS.md)（权威性最高） |
+| **测试与自检** | 插件入口冒烟、设置字段覆盖/分组漂移、设置覆盖规则单测、唤醒流程与信任围栏、客户端半侧（jsdom）等 | `scripts/test-*.mjs`（见下文「自测」） |
 
 ## 项目展示
 
@@ -73,6 +91,10 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 ```
 
 复制 `config.example.json` 为 `config.json` 后编辑：
+
+> 💡 **更省事的方式**：装好插件后直接在 **DSH「设置 → QQ 机器人」**里改 ——
+> 156 项全在 UI 上、每项带中文说明，保存后桥接 5 秒内生效，不用手写 JSON。
+> `config.json` 仍然有效（适合脚本化部署），两者的优先级见上文表格。
 
 > Windows CMD 用户请用：`copy config.example.json config.json`
 
@@ -177,22 +199,51 @@ npm run self-test
 
 预期输出：连接成功 → 测试会话创建 → prompt 被接受 → 打印 agent 回复。
 
+DSH 端与两个插件的自测（改完插件务必先跑第一条 —— 入口写错会让整个 DSH 起不来）：
+
+```bash
+node scripts/dsh-status.mjs            # DSH 侧总览：preset / 设置命名空间 / 插件清单
+node scripts/test-plugin-entry.mjs     # 插件入口冒烟（两个插件的入口真能 import、导出契约齐全）
+node scripts/test-qq-settings.mjs      # 设置字段表 ↔ schema ↔ config.json 覆盖率与分组一致性
+node scripts/test-qq-settings-page.mjs # 设置页：注册进 settings.section、order=1、SSR 渲染结果
+node scripts/test-settings-merge.mjs   # 设置覆盖规则（只覆盖 user 层、撤销回磁盘值）
+node scripts/test-wake.mjs --status    # 唤醒按键：守护 / 桥接 / OneBot 登录态
+node scripts/test-wake.mjs --no-send   # 唤醒的冷启动链路（不发 QQ 消息）
+node scripts/test-wake.mjs --guards    # 唤醒守护规则（单飞锁 / 锁释放 / 缺目录时干净失败）
+node scripts/test-wake-client.mjs      # 唤醒按键的客户端半侧（jsdom 造仿 DSH 侧边栏）
+node scripts/test-wake-fence.mjs       # 唤醒路由的信任围栏（38 项判定）
+node scripts/scan-secrets.mjs          # 发布/提交前：有没有把令牌、真实 QQ 号、本机路径写进仓库
+```
+
+> ⚠️ **改完插件要重启 DSH 才生效**：宿主进程在启动时就把插件入口 `import` 进来了，
+> 模块缓存不会因为文件变了就失效（客户端半侧的启动图同理，F5 不够）。
+
 ## 目录结构
 
 ```
 qq-bridge/
+  AGENTS.md             # 给 AI 代理读的项目说明（文件地图 / 不变量 / 已知坑 / 约束）
+  PORTING-DSH-0.1.2.md  # DSH 0.1.2 移植记录（协议差异、缺陷复盘、实测证据）
   config.example.json   # 配置模板（脱敏占位符；真实 config.json 不入库）
   docs/
     PROJECT_GUIDE.md    # 公开版项目说明书
+    DSH_SETUP.md        # DSH 端安装步骤（已按 0.1.2 更新）
   dsh/agent-presets/    # qq-chat / qq-chat-v2 的 DSH agent preset 模板
-  plugins/qq-mode-console  # DSH 设置页 qq-mode 卡片插件
+  plugins/
+    qq-mode-console/    # DSH 设置页「QQ 机器人」分区（host 注册命名空间 + client 渲染表单）
+    qq-wake/            # DSH 侧边栏「唤醒」按键（host 路由 /api/qq-wake/* + client DOM 行）
   src/
     bridge.js           # 主程序
-    dsh-client.js       # Node 版 DSH API 客户端（WS 下行）
+    dsh-client.js       # Node 版 DSH API 客户端（0.1.2 协议：鉴权 + mux 事件流）
+    settings-merge.js   # 设置页 → 运行时 cfg 的合并规则（只覆盖用户改过的字段）
     md-to-plain.js      # Markdown → QQ 纯文本
     self-test.js        # DSH 侧自测
   scripts/              # 测试/运维脚本（含 postinstall 的 patch-snowluma-sdk.mjs）
-    patch-snowluma-sdk.mjs  # 修补 SDK 的 ESM 打包 bug（postinstall 自动执行）
+    setup-dsh.mjs       # DSH 端安装（preset + MCP + 两个插件挂到 patch 层）
+    test-*.mjs          # 各项自测（见「自测」）
+    scan-secrets.mjs    # 发布前敏感信息扫描
+    publish-fork.mjs    # 走 GitHub Git Data API 的发布工具（不依赖 git push）
+  tools/                # 可选自启守护（默认不装）+ 运维速查
   state/                # 运行时数据（不入库）
 ```
 
@@ -206,3 +257,7 @@ qq-bridge/
 ## 合规提醒
 
 SnowLuma 是独立第三方项目，与腾讯/QQ 无隶属关系，仅供学习与技术研究；使用前请阅读其 EULA 与《QQ 用户协议》。
+
+本仓库是 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 的 **fork**，**原作者为 [Derpyu520](https://github.com/Derpyu520)**；
+上游仓库未附 LICENSE，因此这里按 GitHub 服务条款允许的方式以 fork 形式发布，并在标题下方与本节显式署名。
+如果你要基于本项目做二次开发，请同样保留原作者署名。

@@ -1,6 +1,20 @@
 # QQ ↔ DeepSeek Harness Bridge (qq-bridge)
 
+**Original author: [Derpyu520](https://github.com/Derpyu520)** — upstream repository: [**Derpyu520/qq-bridge**](https://github.com/Derpyu520/qq-bridge)
+**This repository** is a fork maintained by [yuj296](https://github.com/yuj296) (**the DSH 0.1.2 port**), adding protocol support and features on top of the original work. All credit for the original project belongs to its author.
+
 > Connect QQ messages to DeepSeek Harness (DSH) agents: QQ friends/groups become DSH conversations, and agent replies (including questions and tool approvals) are sent back to QQ.
+
+## What this fork adds
+
+| Addition | Details | Where |
+| --- | --- | --- |
+| **DSH 0.1.2 protocol port** | Upstream depends on `@deepseek-ai/dsh-host-apiproxy`, removed in DSH 0.1.2-alpha.1 — the original cannot connect at all. This fork rewrites the client: cookie auth via `?token=`, auto-discovery of port/token, `$events` waterfall replies, `session/follow` multiplexed event stream | `src/dsh-client.js`, `PORTING-DSH-0.1.2.md` |
+| **"QQ Bot" settings section** | A new section in the DSH settings sidebar (right below *General*), exposing **156 options** in 10 groups with per-field descriptions; saving takes effect within 5s. Precedence: **fields edited in the UI > `config.json` (disk) = console edits > code defaults**; untouched fields are never rewritten | `plugins/qq-mode-console/` |
+| **Sidebar "Wake" button** | One row under *Skill Center*: starts SnowLuma + the bridge and sends the owner a QQ message. Local, same-origin requests only (strict IP-literal trust fence; console token never reaches the page) | `plugins/qq-wake/` |
+| **Approvals & task-done notifications on your phone** | Tool approvals are relayed to the owner's QQ ("approve"/"deny" to decide); turns longer than 5 minutes (configurable) send a completion notice | `src/bridge.js` |
+| **Optional auto-start supervisor (not installed by default)** | Scheduled task + 5-minute watchdog; by default nothing auto-starts — the bot only comes up when you press **Wake** | `tools/README.md` |
+| **Docs & self-tests** | `AGENTS.md` (file map / invariants / pitfalls / constraints), porting notes, plugin/wake/settings test scripts | `AGENTS.md`, `scripts/test-*.mjs` |
 
 For the detailed Chinese guide, see **[docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md)**.
 

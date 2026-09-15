@@ -20,29 +20,67 @@ export const ROUTES = {
   wake: '/api/qq-wake/wake'
 };
 
-/** IPv4 回环 127/8、IPv6 ::1、IPv4-mapped ::ffff:127/8。 */
-function isLoopbackAddress(address) {
-  const value = String(address ?? '');
-  if (value === '::1') return true;
-  if (value.startsWith('127.')) return true;
-  const mapped = value.startsWith('::ffff:') ? value.slice(7) : '';
-  return mapped.startsWith('127.');
+/**
+ * 严格解析「点分十进制 IPv4」，且必须是 127/8。
+ *
+ * 这里**绝不能**用 `value.startsWith('127.')`：那样 `127.0.0.1.evil.com` 也会命中，
+ * 于是「域名解析到 127.0.0.1」的 DNS 重绑定攻击就能带着
+ * `Host: 127.0.0.1.evil.com` + `Origin: http://127.0.0.1.evil.com` 走进来 ——
+ * 浏览器视角它是同源（sec-fetch-site 也是 same-origin），围栏全线放行。
+ * 实测过：改之前这个请求拿到 200（见 PORTING §8.5）。
+ * @param {string} value 待判定字符串
+ */
+function isLoopbackIpv4(value) {
+  const matched = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
+  if (!matched) return false;
+  const octets = matched.slice(1).map(Number);
+  if (octets.some((octet) => octet > 255)) return false;
+  return octets[0] === 127;
 }
 
-/** 主机头是否指向本机。 */
-function isLoopbackHostname(hostHeader) {
+/** 取 Host / URL.host 里的裸主机名（去掉端口、拆掉 IPv6 方括号）。 */
+function bareHostname(hostHeader) {
   const host = String(hostHeader ?? '').trim().toLowerCase();
-  if (!host) return false;
-  const bare = host.startsWith('[') ? host.slice(1, host.indexOf(']')) : host.split(':')[0];
-  return bare === 'localhost' || bare === '::1' || bare.startsWith('127.');
+  if (!host) return '';
+  if (host.startsWith('[')) {
+    const end = host.indexOf(']');
+    return end < 0 ? '' : host.slice(1, end);
+  }
+  // 只有一个冒号才是「主机:端口」；多于一个是没加方括号的 IPv6 字面量。
+  const first = host.indexOf(':');
+  if (first < 0 || host.indexOf(':', first + 1) >= 0) return host;
+  return host.slice(0, first);
+}
+
+/** IPv4 回环 127/8、IPv6 ::1、IPv4-mapped ::ffff:127/8（socket 地址由 Node 给出，必为字面量）。 */
+function isLoopbackAddress(address) {
+  let value = String(address ?? '').trim().toLowerCase();
+  if (!value) return false;
+  if (value.startsWith('::ffff:')) value = value.slice(7);
+  if (value === '::1') return true;
+  return isLoopbackIpv4(value);
+}
+
+/**
+ * 主机头（或 Origin 的 host）是否**严格**指向本机。
+ * 只认裸 IP 字面量与 `localhost`；`127.0.0.1.evil.com`、`localhost.evil.com`
+ * 这类「借前缀伪装」的域名一律拒绝。
+ */
+export function isLoopbackHostname(hostHeader) {
+  let bare = bareHostname(hostHeader);
+  if (!bare) return false;
+  if (bare.startsWith('::ffff:')) bare = bare.slice(7);   // IPv4-mapped IPv6 字面量
+  if (bare === 'localhost' || bare === '::1') return true;
+  return isLoopbackIpv4(bare);
 }
 
 /**
  * 请求级信任围栏：socket 地址权威，另加 Host 与浏览器同源标记。
  * @param {import('node:http').IncomingMessage} req
  * @param {boolean} write 写操作额外要求 application/json（跨源简单请求无法伪装）。
+ * @returns {string} 空串=放行；否则是拒绝原因（会被回成 403）。
  */
-function passFence(req, write) {
+export function passFence(req, write) {
   if (!isLoopbackAddress(req.socket?.remoteAddress)) return '只允许本机访问';
   if (!isLoopbackHostname(req.headers?.host)) return 'Host 不是本机';
   if (write) {
@@ -89,13 +127,16 @@ async function readJsonBody(req, maxBytes = 8192) {
 /**
  * 注册唤醒路由。
  * @param {import('@deepseek-ai/cordis').Context} ctx 宿主上下文（含 webServer）。
- * @param {object} [config] 插件配置：{ message?: string, bridgeDir?: string, timeoutMs?: number }。
+ * @param {object} [config] 插件配置：{ message?: string, bridgeDir?: string, snowlumaDir?: string, timeoutMs?: number }。
  */
 export function apply(ctx, config = {}) {
   const logger = ctx?.logger ?? console;
   const bridgeDir = typeof config.bridgeDir === 'string' && config.bridgeDir.trim() !== ''
     ? config.bridgeDir.trim()
     : BRIDGE_DIR;
+  const snowlumaDir = typeof config.snowlumaDir === 'string' && config.snowlumaDir.trim() !== ''
+    ? config.snowlumaDir.trim()
+    : undefined;
   const message = typeof config.message === 'string' && config.message.trim() !== '' ? config.message.trim() : undefined;
   const timeoutMs = Number.isFinite(Number(config.timeoutMs)) && Number(config.timeoutMs) > 0
     ? Number(config.timeoutMs)
@@ -139,6 +180,7 @@ export function apply(ctx, config = {}) {
             message: override || message,
             timeoutMs,
             bridgeDir,
+            snowlumaDir,
             log: (line) => logger.info(`[qq-wake] ${line}`)
           });
           logger.info(`[qq-wake] 唤醒结果 ok=${result.ok} ${result.error ?? ''}`.trim());

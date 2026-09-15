@@ -360,3 +360,220 @@ MCP 三个 server 的挂载方式不变（`@deepseek-ai/dsh-mcp-client` 的配�
 
 所以**装上 `qq-mode-console` 插件之后，切模式请用 DSH 设置页的 qq-mode 卡片**，
 桥接控制台里的切换会在几秒后被设置值覆盖。这是原项目既有的交互，不是本次移植引入的。
+
+---
+
+## 7. 缺陷复盘：插件入口导出漂移 → 整个 harness 起不来（2026-09-15）
+
+### 症状
+
+DSH Desktop 启动直接失败，**不是后台静默报错，是整个 harness 拒绝启动**：
+
+```
+Harness could not start.
+Error: dsh: plugin tree failed to load: failed to apply loader entry include
+(cordis:include): failed to import loader entry qq-mode-console
+(file:///D:/dk/qq-bridge/plugins/qq-mode-console/lib/index.js):
+The requested module './schema.js' does not provide an export named 'GROUP_TITLES'
+```
+
+### 根因
+
+一次重构把 `lib/schema.js` 里的分组表定名为 **`GROUPS`**（`{ core: { order, title, desc }, ... }`），
+但 `lib/index.js` 还停在旧名 `GROUP_TITLES`：
+
+```js
+// 坏：schema.js 里没有 GROUP_TITLES 这个导出
+import { buildSchema, GROUP_TITLES, FIELDS } from './schema.js';
+//                        ^^^^^^^^^^^^ 链接期就炸
+```
+
+ESM 的**静态导入在链接期校验导出名**，命中不到就抛 `SyntaxError`，连模块体都不会执行。
+而 `cordis:include` 是在启动时 import 插件入口的，一个入口炸掉 → 整棵插件树加载失败 →
+harness 起不来。诊断日志的最后一条也停在这之前：
+
+```
+[2026-09-15T11:34:07.760Z] apply called, settings=object      ← 最后一次成功
+[2026-09-15T11:34:07.762Z] registered qq-mode（156 个字段…）    ← 之后 schema.js 被改，再无记录
+```
+
+改文件的时间戳正好对得上：`index.js` 19:28 → `schema.js` 19:39（改名）→ `client.js` 19:40。
+也就是说只有 `index.js` 掉队了。
+
+### 为什么没被测出来（真正的教训）
+
+`scripts/test-qq-settings.mjs` 与 `test-qq-settings-page.mjs` 都只加载
+`schema.js` 和 `client.js`，**从来不 import 插件入口** —— 所以入口和 schema 漂移了，
+两支测试照样全绿（本次事故时它们确实是绿的）。测试覆盖的是"数据对不对"，
+而这次挂的是"模块能不能加载"，是两个层次。
+
+`client.js` 不受影响，因为它是 `window.__ModuleLoader__.load` 的自包含 factory，
+自带 `GROUP_FALLBACK` 兜底表，不从 `schema.js` 导入任何东西。
+
+### 修法
+
+```js
+import { buildSchema, GROUPS, FIELDS } from './schema.js';   // GROUP_TITLES → GROUPS
+...
+groups=${Object.keys(GROUPS).length}                          // 同步改掉唯一的一处引用
+```
+
+`Object.keys(GROUPS).length` 与旧写法语义等价（都数分组个数，10 个）。
+
+### 新增护栏
+
+`scripts/test-plugin-entry.mjs` —— 补上"模块能不能加载"这一层：
+遍历 `plugins/*/`，按 `package.json` 的 `exports["."].default` / `main` 找到入口，
+**真的 import 一次**，并校验 `name`（与目录名一致）/`apply`/`inject` 契约、
+`dsh.client` 声明的客户端半侧文件存在、`cordis.patch.yml` 的 id 与包名一致。
+
+已用反例验证过它确实拦得住：临时塞一个 `import { NOPE } from './schema.js'` 的坏插件，
+脚本报出同样的 `SyntaxError` 并以 `exit 1` 结束。
+
+**照此办理**：以后改插件入口或 `schema.js` 的导出，先跑
+`node scripts/test-plugin-entry.mjs` 再重启 DSH。同类错误只有在真启动时才暴露，
+而它一旦暴露就是"整个 harness 起不来"，代价太高。
+
+---
+
+## 8. 缺陷复盘：设置页覆盖反噬控制台 + 唤醒按键 3 个隐患（2026-09-15）
+
+一次专项审计（"检测插件还有没有漏洞"）在设置/唤醒两个插件里找出 4 个真问题，
+其中两个是"用户一定会撞上"和"能把 DSH 搞崩"级别的。
+
+### 8.1 设置页把控制台改的配置冲掉（用户一定会撞上）
+
+**症状**：在桥接控制台里改了白名单 / 黑话参数 / 社交参数，5 秒后自己变回原样，
+控制台看起来"改了没用"。
+
+**根因**：桥接原本拿命名空间**解析后的整值**去覆盖 cfg：
+
+```js
+applySettingsOverrides(ns.value);   // ns.value = base + user
+```
+
+而 `base` 是 **DSH 启动那一刻的 config.json 快照**，在进程里冻结。
+控制台改配置时会写 config.json 并更新内存里的 cfg —— 但 5 秒后的下一轮轮询
+会把那份陈旧快照重新盖回去，于是改动被静默撤销。范围覆盖 schema 里所有可调项
+（allow / deny / slang / social / socialV2 / security / consolePort…）。
+
+**修法**：只认 `ns.user`（用户真正在设置页里显式改过的字段），并且处理"撤销"：
+
+```js
+const overrides = ns?.user ?? null;      // 不是 ns.value
+applyOverrides({ target: cfg, user: overrides, applied: settingsApplied,
+                 freshConfig: readJsonSafe(path.join(ROOT, 'config.json'), null) });
+```
+
+- 用户没在设置页碰过的字段 → 一个字都不动（控制台 / 手改 config.json 照旧说了算）；
+- 用户改过的字段 → 设置页说了算；
+- 用户在设置页点了「已改」重置 → 该字段**回到磁盘上 config.json 的值**
+  （靠记住上一轮施加过的叶子路径 + 重新读盘；否则会卡在旧的覆盖值上）。
+
+**护栏**：合并规则被抽成纯函数 `src/settings-merge.js`，由
+`scripts/test-settings-merge.mjs` 单测（24 项），其中两条专门盯这个场景：
+"用户没改过 → 一个字都不动" 与 "撤销 → 还原成磁盘值"。
+
+### 8.2 `spawn` 没有 error 监听 → 点唤醒能把 DSH 搞崩
+
+**症状**：`node.exe` 路径不存在时（换机器、换 node 版本），点一次唤醒，
+DSH harness 进程直接**未捕获异常退出**。
+
+**根因**：`spawn()` 的失败是**异步** `emit('error')` 的，而 ChildProcess 的 `error`
+事件没有监听器时 Node 会把它抛成未捕获异常。`plugins/qq-wake/lib/wake.js` 的
+`spawnDetached()` 当时既没监听 `error`，也没检查可执行文件是否存在。
+
+**修法**：先 `fs.existsSync(nodeExe)` 同步挡一道；`spawn` 外面包 try/catch；
+补 `child.on('error', ...)` 兜底；拿不到 `child.pid` 时**不写 pid 文件**
+（写 `"undefined"` 会让下次唤醒读到脏值）；两处调用点拿到 0 直接返回失败，
+不再空等 4 分钟。
+
+### 8.3 pid 复用 → 可能杀掉无关进程
+
+**症状**：潜在（未实际触发）。pid 文件是陈旧的，而该 pid 已被系统分给别的程序时，
+唤醒流程里的"重启 SnowLuma"会 `process.kill()` 掉那个无辜进程。
+
+**根因**：`killTracked()` 只检查 `isAlive(pid)`，没确认那还是不是 node 进程。
+
+**修法**：杀之前用 `tasklist /FI "PID eq N" /FO CSV /NH` 确认进程名匹配 `node.exe`
+（Windows 中文输出的 GBK 解码与 `schtasks` 同处理）；问不出来就**不杀**（宁可不重启）。
+
+### 8.4 并发唤醒 → 起两个 SnowLuma
+
+**症状**：连点两次唤醒（或两个页面同时点）会各自看到"SnowLuma 没在跑"，
+于是各起一个：端口打架、QQ 被重复注入。
+
+**修法**：`runWake()` 加单飞锁 —— 进行中的唤醒被复用（返回同一个 Promise），
+结束后释放。客户端按钮的 busy 态只是 UI 层，不能当并发控制。
+
+**护栏**：`node scripts/test-wake.mjs --guards` 断言
+"并发调用返回同一个 Promise" + "上一轮结束后锁已释放"。
+
+### 8.5 唤醒路由围栏被「借前缀的域名」穿过（DNS 重绑定）
+
+**症状**：`plugins/qq-wake/lib/index.js` 的 `isLoopbackHostname()` 用
+`bare.startsWith('127.')` 判断主机名是不是本机。字符串前缀判断不是 IP 判断 ——
+`127.0.0.1.evil.com` 也以 `127.` 开头，于是**整条围栏全线放行**：
+
+```
+curl -H "Host: 127.0.0.1.evil.com:43129" \
+     -H "Origin: http://127.0.0.1.evil.com:43129" \
+     -H "Sec-Fetch-Site: same-origin" \
+     http://127.0.0.1:43129/api/qq-wake/status
+→ HTTP 200（实测，见下表）
+```
+
+**为什么其它几道关卡都拦不住**：
+
+| 关卡 | 为什么失效 |
+|---|---|
+| socket 回环检查 | 浏览器确实连到 127.0.0.1，`remoteAddress` 就是回环 |
+| `Host` 检查 | `127.0.0.1.evil.com` 命中了 `startsWith('127.')` |
+| `sec-fetch-site` | 攻击页与目标**同源**（都是 `127.0.0.1.evil.com`），浏览器老实报 `same-origin` |
+| `Origin` 检查 | 同一个 `startsWith` 漏判，`Origin` 也过了 |
+
+**攻击条件**：攻击者控制一个**以 `127.` 开头、A 记录指向 127.0.0.1** 的域名
+（`127.0.0.1.nip.io` 这类现成服务即可），再让用户浏览器打开该域名下的页面。
+若再配上 `Content-Type: application/json`（同源 fetch 可以自由设置，无预检），
+就能直接打 `/api/qq-wake/wake` —— 在用户机器上拉起进程、并以管理员身份发一条 QQ 消息。
+影响面止于「启动机器人 + 发 ≤40 字消息」和「读到状态里最近几条 QQ 活动」，
+但这是**没有鉴权的本地写接口被远程触发**，不能留白。
+
+**修法**：主机名判定改成**严格字面量解析**（`plugins/qq-wake/lib/index.js`）：
+
+- `isLoopbackIpv4()` 用 `/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/` 取四段十进制，
+  校验每段 ≤255 且首段是 127；`127.0.0.1.evil.com`、`127.0.0.1.nip.io`、`0x7f.0.0.1`
+  自然全部落空。
+- `bareHostname()` 只把**唯一一个冒号**当端口分隔符（多于一个是没加方括号的 IPv6），
+  方括号 IPv6 单独解析；`localhost` 只认精确匹配。
+- `::ffff:127.0.0.1` 这类 IPv4-mapped 地址先剥前缀再判。
+- `passFence()` / `isLoopbackHostname()` 一并导出，供自测直接钉住规则。
+
+**护栏**：`node scripts/test-wake-fence.mjs`（38 项：主机名 / socket / 同源标记 /
+写操作 content-type），加 `--live` 会真的打一遍运行中的路由（自动发现 DSH 端口），
+断言「本机 200、伪装 Host 403、跨站 Origin 403」。**注意**：宿主侧插件是启动时
+import 的，改完必须重启 DSH 才生效 —— `--live` 打不通/仍 200 时脚本会直接提示这一点。
+
+### 审计结论
+
+| # | 问题 | 级别 | 状态 |
+|---|---|---|---|
+| 1 | 插件入口导出漂移 → harness 起不来 | 致命 | 已修（§7），有 `test-plugin-entry.mjs` 护栏 |
+| 2 | 设置页覆盖反噬控制台改动 | 高（必撞） | 已修（§8.1），有 `test-settings-merge.mjs` |
+| 3 | spawn 无 error 监听 → 崩 harness | 高 | 已修（§8.2） |
+| 4 | pid 复用误杀 | 中（潜在） | 已修（§8.3） |
+| 5 | 并发唤醒重复起进程 | 中 | 已修（§8.4），有 `test-wake.mjs --guards` |
+| 6 | 唤醒路由围栏被伪装 Host 穿过（DNS 重绑定） | 中（需诱导访问恶意域名） | 已修（§8.5），有 `test-wake-fence.mjs` |
+
+另外核查过、**没有发现问题**的点：设置写入的多段路径支持
+（`dsh-settings` 的 `applyPathOp` 递归处理嵌套路径）、机密未被写进 schema
+（`redactSecrets` 会让宿主读回空值）、`tools/*.ps1` 的 UTF-8 BOM、发布前的
+敏感信息扫描、`mode` 不进设置命名空间的 base（没在页面里选过时沿用 `state/mode.json`）、
+156 项设置与 `config.json` 的覆盖率与分组表一致性。
+
+> 上一版这里还写着「信任围栏没有问题」—— 那是只测了跨站 Origin / 跨站
+> `sec-fetch-site` / 非 JSON content-type 三种情况得出的结论。**测围栏要按「攻击者能构造的
+> 请求头」穷举**，只测自己想到的几种等于没测；这次补的 `test-wake-fence.mjs` 就是把这几种
+> 一次性钉死。
+
+

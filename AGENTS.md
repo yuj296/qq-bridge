@@ -45,15 +45,21 @@ QQ 消息 → SnowLuma(OneBot v11) → 本桥接进程 → DSH 会话 → agent 
 | 路径 | 职责 | 什么时候改它 |
 |---|---|---|
 | `src/bridge.js` | **主程序**（~8.2k 行）。QQ 事件处理、会话映射、模式逻辑、控制台 HTTP、social/reserved2 仿真 | 业务逻辑 |
+| `src/settings-merge.js` | **设置页 → cfg 的合并规则**（纯函数：只覆盖 user 层、撤销时回磁盘值） | 改优先级/覆盖规则时 |
 | `src/dsh-client.js` | **DSH 0.1.2 客户端**。鉴权、端点调用、事件流多路复用、提问/审批双向翻译 | DSH 协议变更时 |
 | `src/dsh-client.0.1.1.js.bak` | 上游原文件（对照用，**不要改动、不要删**） | 永不 |
 | `src/mcp-*.js` | 三个 MCP server，作为子进程被 DSH 拉起 | 给 agent 加工具时 |
 | `dsh/agent-presets/qq-chat*/` | 两个 DSH agent preset（**安全边界在这**） | 改 agent 人格/权限时 |
-| `plugins/qq-mode-console/` | DSH 设置页的 `qq-mode` 卡片（host 插件） | 改设置项时 |
+| `plugins/qq-mode-console/` | **DSH 设置页的「QQ 机器人」分区**（host 注册 settings 命名空间 + client 渲染整页表单） | 加/改可调项时 |
 | `plugins/qq-wake/` | **DSH 侧边栏「唤醒」按键**：host 路由 `/api/qq-wake/*` + client DOM 行 | 改唤醒行为时 |
-| `scripts/test-wake.mjs` | 唤醒流程自测（不经过 DSH，直接跑宿主侧逻辑） | — |
+| `scripts/test-qq-settings.mjs` | 设置项自测（字段表 ↔ schema ↔ config.json 覆盖率、说明长度） | — |
+| `scripts/test-qq-settings-page.mjs` | 设置页自测（注册槽位/order + SSR 渲染结果） | — |
+| `scripts/test-plugin-entry.mjs` | **插件入口冒烟**（真的 import 一次入口，挡「导入了不存在的导出」这类让 harness 起不来的错误） | 加/改插件入口或 `schema.js` 导出时 |
+| `scripts/test-settings-merge.mjs` | **设置覆盖规则**（纯函数单测：只覆盖 user 层、控制台改动不被冲掉、撤销回磁盘值） | 改 `src/settings-merge.js` 时 |
+| `scripts/test-wake.mjs` | 唤醒流程自测（`--status` / `--no-send` / `--guards` 守护规则） | — |
 | `scripts/test-wake-client.mjs` | 唤醒按键**客户端半侧**自测（jsdom 造仿 DSH 侧边栏） | — |
-| `tools/dsh-qq-bot.ps1` | 守护脚本（自启/自愈） | 改运维策略时 |
+| `scripts/test-wake-fence.mjs` | **唤醒路由的信任围栏**自测（主机名严格字面量、回环、同源标记、写操作 JSON）；`--live` 打真路由 | 改围栏判定时 |
+| `tools/dsh-qq-bot.ps1` | 守护脚本（**可选自启**，默认不装） | 改运维策略时 |
 | `scripts/setup-dsh.mjs` | DSH 端安装 | 安装流程变更时 |
 | `scripts/dsh-status.mjs` | 状态总览（**排查第一步**） | — |
 | `scripts/publish-fork.mjs` | **不依赖 git push** 的发布工具（走 GitHub Git Data API，只传变更文件） | 往 fork 推改动时 |
@@ -128,6 +134,14 @@ Host→客户端: {"type":"item","streamId":…,"value":…} / {"type":"end",…
 
 ## 4. 配置（`config.json`，**不入库**；模板见 `config.example.json`）
 
+**改配置的首选入口是 DSH 设置页的「QQ 机器人」分区**（见 §5.2；在设置左边导航里，
+「通用设置」正下方）—— 它把下面这张表整份搬到了 UI 上，156 项全可改，每项都带详细说明。优先级：
+**设置页里改过的字段 > config.json（磁盘） = 桥接控制台改的值 > 代码默认值**
+（桥接只覆盖「你在设置页里动过的那几项」，没动过的它一个字都不碰）。
+
+> 字段清单的唯一真源是 `plugins/qq-mode-console/lib/schema.js` 的 `FIELDS` 表；
+> 下面这张表只是**重点项的速查**，不是全集。
+
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `dsh.baseUrl` | `http://127.0.0.1:3080` | 留默认即走自动发现；显式写了非默认值则以其为准 |
@@ -155,17 +169,17 @@ node src/bridge.js          # 直接跑（前台）
 # 或双击 start.bat / restart.bat
 ```
 
-自启由 Windows 计划任务 **`DSH QQ Bot Supervisor`** 提供（跑 `tools/dsh-qq-bot.ps1`），
-**两个触发器缺一不可**：`登录时` + **`每 5 分钟看门狗`**（`-Once` + `RepetitionInterval PT5M`）。
-守护是常驻进程，而登录触发器一辈子只触发一次 —— 守护一旦被杀就永久缺席，
-所以看门狗是**唯一**的自动恢复手段（详见 `tools/README.md` 的「两个触发器」一节）。
+**默认没有自动启动。** 机器人只在 DSH 侧边栏点「唤醒」时才起来（见 §5.1）——
+不注册计划任务、不开机自启、不做常驻守护。这是用户的明确要求，别自作主张加回去。
 
-**判断守护活着没有，看心跳文件，不要看任务状态**：
-`state/supervisor/supervisor.heartbeat`（每 20s 刷新 `pid=… 时间`）。
-`Get-ScheduledTask` 的 `State` 会骗人（被杀后照样回到 `Ready`）。
+`tools/` 里的自启守护（`dsh-qq-bot.ps1` + 计划任务 `DSH QQ Bot Supervisor`）是
+**可选件、默认不装**。真要「开机自启 + 自愈」时再手动跑 `tools/install-task.ps1`；
+那一套的要点在 `tools/README.md`（两个触发器缺一不可；判断守护死活看
+`state/supervisor/supervisor.heartbeat`，别看计划任务的 `State` —— 它被杀后照样显示 `Ready`）。
 
-**改完 `config.json`、`bridge.js`、`dsh-client.js` 都必须重启桥接才生效**
-（守护脚本会在 ~20s 内自动拉起）。
+**改完 `config.json`、`bridge.js`、`dsh-client.js` 都必须重启桥接才生效**：
+装了自启守护的话它会在 ~20s 内自动拉起；**默认没装，所以要么点一次「唤醒」，
+要么手动跑 `node src/bridge.js`**。
 
 **注意 `bridge.log` 的时间戳是 UTC**（比本地时间少 8 小时），`supervisor.log` 是本地时间 ——
 对时间线时先换算，别以为桥接是几小时前死的。
@@ -182,8 +196,11 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
 
 要点（改这个插件前必读）：
 
-- **patch 层是 live reload 的**：改完 `setup-dsh.mjs` 重跑一遍、宿主路由立刻生效；
-  **但已经打开的页面要 F5 刷新一次**才会拉新的客户端启动图 —— 不需要重启 DSH。
+- **改插件源码必须重启 DSH**：宿主进程在启动那一刻就把插件入口 `import` 进来了，
+  Node 的模块缓存不会因为文件变了就失效。**实测证据**：改完围栏判定后，运行中的
+  `/api/qq-wake/status` 照旧按老代码放行伪装 Host（`test-wake-fence.mjs --live` 会直接点出来）。
+  只有改 patch 层条目（`cordis.patch.yml`）才是重跑 `setup-dsh.mjs` 即可生效；
+  客户端半侧的启动图也是启动时快照的，**F5 不够**。
 - **客户端半侧不是普通 ESM**：必须有 `window.__ModuleLoader__.load({id, factory})` 外壳，
   `id` 等于包名，`factory` 返回 `module.exports` 并挂 `apply`/`inject`。
 - **客户端 `apply` 绝不能抛**（抛了整个 Web 外壳起不来）；本插件全部包在 try/catch 里。
@@ -192,6 +209,41 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
 - **控制台令牌不下发到页面**：浏览器只跟同源的 `/api/qq-wake/*` 说话，宿主侧再带
   `x-console-token` 去敲桥接控制台；路由有本机 + 同源信任围栏。
 - 细节与坑见 `plugins/qq-wake/README.md`。
+
+### 5.2 设置页「QQ 机器人」分区（`plugins/qq-mode-console/`）
+
+配置的**主入口**：DSH「设置」左边导航里**「通用设置」正下方**那个 **QQ 机器人**分区
+（`settings.section`，order=1），156 个字段按 10 组分好
+（基本 / 通知 / 白名单 / 黑名单 / 安全 / 黑话学习 / 一代仿真 / 二代仿真 / 模型 / SnowLuma 接线），
+每个字段都带一段中文说明，改完点保存 → 桥接 5 秒内生效。
+
+机制（改之前必读）：
+
+| 半侧 | 文件 | 干什么 |
+|---|---|---|
+| host | `lib/schema.js` | **字段表（唯一真源）**：`[路径, 类型, '标签', '详细说明']` + 分组表 `GROUPS` |
+| host | `lib/index.js` | 按字段表建 schema，注册 `qq-mode` 命名空间；`base` = 当前 `config.json`（机密与 `mode` 除外） |
+| client | `lib/client.js` | 注册 `settings.section` 分区；**按 schema 自动生成页面**，所以加字段只改 `schema.js` |
+| bridge | `src/settings-merge.js` + `bridge.js` 的 `applySettingsOverrides()` | 每 5s 拉一次**命名空间的 user 层**合并进 cfg（只覆盖用户改过的字段） |
+
+- **只认 `ns.user`，不要用 `ns.value`**：`ns.value` = base + user，而 base 是 **DSH 启动那一刻的
+  config.json 快照**，用它整体覆盖会把运行期间**桥接控制台**改的配置（白名单/黑话/社交参数）
+  在 5 秒后改回去 —— 这个坑真踩过，见 PORTING §8.1。用户没碰过的字段必须一个字都不动。
+- **撤销要回磁盘值**：用户点「已改」重置后该字段从 user 层消失，桥接靠"上一轮施加过的路径" +
+  重读 `config.json` 把它还原（不然会卡在旧覆盖上）。规则在 `src/settings-merge.js`，
+  单测 `scripts/test-settings-merge.mjs`。
+- **DSH 的设置页不会自动渲染 settings 命名空间**：左边导航每个分区都是插件用
+  `settings.section` 自己注册的（官方 order：通用设置 0 / 模型 10 / 插件 15 / Agent 预设 20），
+  「插件 → 插件配置」也只渲染有人认领的命名空间（`settings.plugin.item` 按 namespace 分键）。
+  **光调 `ctx.settings.register()` 界面上什么都没有** —— 必须自带 client 半侧写页面。
+- **分组只活在展示层**：schema 的嵌套结构必须等于 `config.json` 的嵌套结构（桥接要深合并），
+  所以 `notifyTaskDone*` 这些顶格字段归到"通知"组靠的是 host/client 各一份的
+  `TOP_LEVEL_GROUPS` 表（`test-qq-settings.mjs` 校验两边一致），不能真把字段挪进 `notify` 对象。
+- **机密不进 schema**：`snowluma.accessToken` / `consoleToken` / `dsh.token` 只认 `config.json`。
+  设置协议强制 redactSecrets，桥接读不回来，写进去只会变成只写陷阱。
+- **`mode` 不进 base**：没在页面里选过模式，就沿用桥接控制台 / `state/mode.json`（老行为）。
+- **改了要重启桥接的项**：`consolePort`、`snowluma.wsUrl/httpUrl`（字段说明里标了 ⚠️）。
+  其余项（白名单、通知、仿真参数、工具开关…）都是下一拍就生效。
 
 ---
 
@@ -207,7 +259,13 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
 | `node scripts/fake-onebot.mjs` | **无 QQ 也能端到端测桥接** | 注入私聊后打印桥接回发的消息 |
 | `node scripts/test-wake.mjs --status` | 侧边栏「唤醒」按键的宿主侧逻辑：守护/桥接/OneBot 登录态 | `awake: true`，`exit 0` |
 | `node scripts/test-wake.mjs --no-send` | 唤醒的**冷启动**链路（不发 QQ 消息） | 三步全 ✓，`exit 0` |
+| `node scripts/test-wake.mjs --guards` | **唤醒的守护规则**：并发调用复用同一次（单飞）、锁会释放、SnowLuma 目录不存在时干净失败 | 3 项全 ✓、`exit 0` |
 | `node scripts/test-wake-client.mjs` | **客户端半侧**（jsdom 造仿 DSH 侧边栏）：行是否落在「技能中心」正下方、点击是否打唤醒路由、外壳未就绪时是否不抛 | 13 项全 ✓，`exit 0`（缺 jsdom 则跳过） |
+| `node scripts/test-wake-fence.mjs [--live]` | **唤醒路由的信任围栏**（38 项：主机名严格字面量、socket 回环、`sec-fetch-site`/`Origin`、写操作必须 JSON）。加 `--live` 再打一遍运行中的真路由（自动发现端口） | 38 项全 ✓、`exit 0`；`--live` 时「本机 200 / 伪装 Host 403 / 跨站 Origin 403」 |
+| `node scripts/test-qq-settings.mjs` | **设置项**：字段表 ↔ schema ↔ `config.json` 是否对得上（覆盖率/重复/类型/说明长度/两边分组表一致） | 156 项全 ✓、`config.json` 全覆盖（机密除外）、`exit 0` |
+| `node scripts/test-settings-merge.mjs` | **设置覆盖规则**（纯函数单测，24 项）：只覆盖 user 层、控制台改动不被冲掉、撤销回磁盘值、深拷贝隔离 | 24 项全 ✓、`exit 0` |
+| `node scripts/test-qq-settings-page.mjs` | **设置页**：注册进 `settings.section`、`order=1`、SSR 渲染出 10 个分组与字段说明 | 15 项全 ✓、`exit 0`（缺 react 则跳过） |
+| `node scripts/test-plugin-entry.mjs` | **插件入口**：每个 `plugins/<name>` 的入口真能 import 进来、导出了 `name`/`apply`/`inject`、客户端半侧文件在、`cordis.patch.yml` 的 id 对得上 | 15 项全 ✓、`exit 0`。**入口写错会让整个 harness 起不来，改完插件务必先跑这支** |
 | `node scripts/scan-secrets.mjs` | **发布/提交前自检**：有没有把令牌、真实 QQ 号、本机路径写进会入库的文件 | `✅ 未发现敏感信息`，`exit 0` |
 
 **沙箱/CI 注意**：本机 PowerShell 管道捕获 `node` 输出会被沙箱拦（命名管道），
@@ -239,10 +297,34 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
    要测审批得用带工具的 preset（如 `standard`）。
 7. **DSH 每个会话的事件必须单独订阅**（`session/follow`），没有全局会话流。
    想订阅「用户自己的编码会话」需显式 `startSessionDiscovery()`。
-8. **`qq-mode` DSH 设置优先于 `state/mode.json`**：
-   `refreshMode()` 先读设置命名空间、命中就 return。装了插件后**切模式要用 DSH 设置页**，
-   桥接控制台的切换会在几秒后被覆盖。
+8. **`qq-mode` 命名空间只覆盖「卡片里写过」的字段**：`refreshMode()` 先读设置命名空间，
+   只有 `mode` 真在命名空间里（也就是在设置卡片里选过）才用它，否则回退
+   `state/mode.json`（= 桥接控制台）。
+   ⚠️ **本条以前写的是「装了插件后切模式要用 DSH 设置页」，那是错的** ——
+   在 §5.2 那张卡片存在之前，命名空间根本没有 UI（见坑 10），切模式只能用桥接控制台。
 9. **`config.json` / `state/` 含密钥与运行时数据，绝不入库**（`.gitignore` 已排除）。
+10. **DSH 的设置页不会自动渲染 settings 命名空间**：插件配置分区只渲染**有人认领**的命名空间
+    （`settings.plugin.item` 按 namespace 分派卡片），官方只给自己的几个命名空间写了卡片。
+    **光调 `ctx.settings.register()` 是不会出现任何 UI 的** —— 必须自带 client 半侧写卡片，
+    否则用户永远看不到（这正是 qq-mode 之前的状况）。
+11. **schemastery 的 Schema 实例是「函数」**（可调用做校验），不是普通对象。
+    写「叶子 vs 分组」判断时用 `typeof x.type === 'string'`，
+    用 `typeof x === 'object'` 会递归进 Schema 内部（有循环引用）→ 直接爆栈。
+12. **设置覆盖只认 `ns.user`**：`ns.value` = base + user，而 base 是 **DSH 启动那一刻的
+    config.json 快照** —— 拿它整体覆盖会把运行期间**桥接控制台**改的配置在 5 秒后改回去
+    （真踩过，见 PORTING §8.1）。撤销（字段从 user 层消失）要靠"上一轮施加过的路径 +
+    重读 config.json"还原，否则会卡在旧覆盖值上。
+13. **`spawn()` 的失败是异步 `emit('error')`**：没挂 `error` 监听器时 Node 抛未捕获异常 ——
+    在宿主插件里就是**把 DSH harness 打崩**。同理**杀进程前先确认那个 pid 现在还是 node**
+    （pid 会被系统复用，陈旧 pid 文件可能指向别的程序）。`plugins/qq-wake/lib/wake.js` 两处都有防护，
+    见 PORTING §8.2/§8.3。
+14. **判「请求来自本机」不能用字符串前缀**：`host.startsWith('127.')` 会把
+    `127.0.0.1.evil.com`、`127.0.0.1.nip.io` 当成回环 —— 只要攻击者有个「以 `127.` 开头、
+    A 记录指向 127.0.0.1」的域名，DNS 重绑定就能整条穿过围栏（`Host` 过了、`Origin` 过了、
+    浏览器还老实报 `sec-fetch-site: same-origin`），实测拿到 **200**，见 PORTING §8.5。
+    必须按 **IP 字面量严格解析**（四段十进制 + 每段 ≤255 + 首段 127）。
+    另外记住：**测围栏要穷举「攻击者能构造的请求头」，只测自己想到的那几种等于没测** ——
+    上一轮审计就是漏了这一种才误判成"没问题"。护栏：`scripts/test-wake-fence.mjs`。
 
 ---
 
@@ -250,7 +332,8 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
 
 | 症状 | 先看 | 大概率原因 |
 |---|---|---|
-| **什么都没启动（端口 5099/3000/3100 全不通），`supervisor.log` 只有一行 `守护启动` 之后没有下文** | `supervisor.heartbeat` 的时间戳走不走；任务的 `LastTaskResult` | 守护进程被杀（`0xC000013A` = 控制台关闭事件）→ 见 §5 与 `tools/README.md`「两个触发器」。看门狗 5 分钟内补位；`Start-ScheduledTask` 立刻恢复 |
+| **什么都没启动（端口 5099/3000/3100 全不通）** | 先点一次侧边栏「唤醒」 | **这是预期状态**：默认不自动启动，机器人只在点唤醒时起来（§5.1）。唤醒失败就看按钮 tooltip 里卡在哪一步 |
+| （仅当装了可选自启守护时）日志只有一行 `守护启动` 之后没有下文 | `supervisor.heartbeat` 时间戳走不走；任务 `LastTaskResult` | 守护进程被杀（`0xC000013A` = 控制台关闭事件）→ 每 5 分钟看门狗会补位；或干脆改用「唤醒」按键 |
 | 桥接起不来、报「已有一个实例在运行」 | `state/bridge.lock` | 重复启动；守护会清过期锁 |
 | `SnowLuma 连接断开（code=1006）` 刷屏 | 端口 3000/3001 | SnowLuma 的 QQ 会话掉了 → 见坑 1 |
 | OneBot 端口在听但 `/get_login_info` 超时 | SnowLuma 日志 `EPIPE` | 注入管道断了；重启 SnowLuma（**不用重扫码**） |
@@ -259,9 +342,14 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
 | 审批没到手机 | `relayApprovalsToOwner` | 或该会话被映射到了别的 QQ 会话 |
 | 侧边栏**没有「唤醒」按键** | 页面是否刷新过（F5）；`/api/qq-wake/status` 是否 200 | 插件挂了但页面是旧的 → 刷新即可；路由也 404 则是 patch 层没挂上（重跑 `setup-dsh.mjs`） |
 | 点唤醒报「唤醒失败」 | tooltip 里那几行步骤 | 多半是 QQ 客户端没开/没登录（SnowLuma 注入不了），或桥接 60s 内没起来 |
+| 设置页里**找不到「QQ 机器人」分区** | 设置左边导航里「通用设置」下面有没有；DSH 重启过没有 | 分区由 client 半侧注册（`settings.section`）；改完插件要**重启 DSH** 才会加载（F5 不够） |
+| 设置页改了但机器人行为没变 | `state/bridge.log` 找「已从 DSH 设置页应用 N 项配置」 | 桥接每 5s 拉一次；`consolePort`/`snowluma` 地址这类接线项要重启桥接 |
+| **在控制台改的配置过几秒自己变回去** | `state/bridge.log` 找「已从 DSH 设置页应用」 | 历史缺陷（已修，见 PORTING §8.1）：以前拿 base+user 整体覆盖。确认 `src/settings-merge.js` 在位、`refreshMode()` 读的是 `ns.user` |
+| 保存设置报「写入后状态异常」 | 设置提供方是否可写（`settings.describe` 的 `writable`） | 本机设置存储只读或 revision 冲突（另一个页面刚改过）→ 重新加载页面再存 |
 | DSH 启动报 `cannot resolve profile bundle` | `profiles/*/cordis.patch.yml` | 是**旧版脚本**残留；见 `PORTING-DSH-0.1.2.md` §6 |
 
-统一入口：**`state/supervisor/supervisor.log`** + `tools/README.md` 的故障速查表。
+统一入口：**侧边栏「唤醒」按键的 tooltip**（卡在哪一步一目了然）+ `state/bridge.log`；
+装了可选自启守护时再加 `state/supervisor/supervisor.log` 与 `tools/README.md` 的故障速查表。
 
 ---
 
@@ -281,6 +369,12 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
 - **不要在客户端半侧（`lib/client.js`）里抛异常**：客户端插件 apply 抛出会让整个
   Web 外壳启动失败。
 - **不要**把桥接控制台令牌（`state/console-token`）下发到浏览器；一律由宿主半侧代发。
+- **不要**用 `ns.value`（= base + user）去覆盖运行中的 cfg —— base 是 DSH 启动时的 config.json
+  快照，会把控制台运行期改的东西改回去；**只认 `ns.user`**（见 §5.2、PORTING §8.1）。
+- **不要**在宿主插件里 `spawn()` 却不挂 `error` 监听器（未捕获的 child error 会把 DSH 打崩）；
+  也**不要**只凭一个陈旧 pid 就 `process.kill()`（pid 会被复用，先确认它还是 node）。
+- **不要**用 `startsWith('127.')` 这类字符串前缀去判 IP / 主机名（`127.0.0.1.evil.com`
+  会命中，等于围栏没设）—— 按 IP 字面量严格解析，见坑 14。
 - **不要**把 `config.json`、`state/`、令牌、QQ 号写进仓库或文档。
 
 ---
@@ -289,7 +383,7 @@ DSH Web GUI 侧边栏「技能中心」正下方那个**唤醒**按键 = 「把�
 
 | 文档 | 内容 |
 |---|---|
-| `PORTING-DSH-0.1.2.md` | 移植全过程：协议差异表、4 个缺陷复盘、DSH 端安装、两个手机端能力 |
+| `PORTING-DSH-0.1.2.md` | 移植全过程：协议差异表、**6 个缺陷复盘**（§7 入口导出漂移、§8 设置覆盖反噬 + 唤醒 4 隐患（含围栏被伪装 Host 穿过））、DSH 端安装、两个手机端能力 |
 | `docs/PROJECT_GUIDE.md` | 上游原版的项目指南（架构/数据流，协议部分已过时） |
 | `docs/DSH_SETUP.md` | DSH 端安装步骤（已按 0.1.2 更新） |
 | `tools/README.md` | 自启守护、常用命令、故障速查 |
