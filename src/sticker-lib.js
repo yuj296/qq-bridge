@@ -44,16 +44,43 @@ export function normalizeStickerEntry(raw) {
   };
 }
 
-export function loadStickerStore(file) {
+/**
+ * 读本地表情库，并**区分「读不出来」与「库是空的」**。
+ *
+ * 为什么必须区分（2026-09-16 审计实测复现）：以前这里把两者都返回 `[]`，而任何一次保存都会把
+ * 内存里的空列表原子写回 —— `state/stickers.json` 一旦被写坏（断电、手编、磁盘故障），
+ * 启动时静默变空、随后一次 saveStickerStoreSafe() 就把用户的收藏认知（备注/标签/使用次数）清零。
+ * 现在读失败返回 `ok:false`，调用方据此进入**只读降级**：拒绝写回 + 记一条警告。
+ *
+ * @param {string} file 库文件路径。
+ * @returns {{ok: boolean, entries: Array, reason: string, missing: boolean}}
+ *   ok:false = 文件存在但读不出来 / 内容坏了（**不要写回**）；missing:true = 文件不存在（全新库，正常）。
+ */
+export function readStickerStore(file) {
+  let text;
   try {
-    let text = fs.readFileSync(file, 'utf8');
-    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-    const parsed = JSON.parse(text);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map(normalizeStickerEntry).filter(Boolean);
-  } catch {
-    return [];
+    text = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { ok: true, entries: [], reason: '文件不存在（全新库）', missing: true };
+    return { ok: false, entries: [], reason: `读文件失败：${error?.message ?? error}`, missing: false };
   }
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  if (text.trim() === '') return { ok: true, entries: [], reason: '空文件（全新库）', missing: true };
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    return { ok: false, entries: [], reason: `JSON 解析失败：${error?.message ?? error}`, missing: false };
+  }
+  if (!Array.isArray(parsed)) {
+    return { ok: false, entries: [], reason: '内容不是数组（文件可能被写坏）', missing: false };
+  }
+  return { ok: true, entries: parsed.map(normalizeStickerEntry).filter(Boolean), reason: 'ok', missing: false };
+}
+
+/** 兼容旧用法：只要数组。**需要区分"坏了"与"空"时必须用 readStickerStore()。** */
+export function loadStickerStore(file) {
+  return readStickerStore(file).entries;
 }
 
 export function saveStickerStore(file, entries) {
@@ -121,7 +148,9 @@ export function findSticker(entries, ref) {
     if (e.id === id || e.resId === id) return true;
     if (e.md5 && e.md5 === md5) return true;
     const eUrl = String(e.url || '').replace(/\/+$/, '').replace(/^https?:\/\//i, '');
-    if (eUrl && urlNormalized && (eUrl === urlNormalized || eUrl.includes(urlNormalized) || urlNormalized.includes(eUrl))) return true;
+    // 只认「归一化后完全相等」：原来的双向 includes 会让残缺 URL / 短串命中错误的表情，
+    // 而调用方会拿这个 id 去改真实 QQ 备注（写操作，改错了很难发现）。
+    if (eUrl && urlNormalized && eUrl === urlNormalized) return true;
     return false;
   }) || null;
 }

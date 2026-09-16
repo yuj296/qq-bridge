@@ -13,17 +13,19 @@
 //   5.（第 8 节）本项目**只保留私聊**：群白/黑名单、群专属仿真参数、群工具开关删了就不许回来，
 //      文案里也不许再出现「群」。
 //
-// schemastery 不在本仓库依赖里 —— 从 DSH Desktop 自带的那份拿；拿不到就跳过。
+// schemastery 不在本仓库依赖里 —— 从 DSH Desktop 自带的那份拿；拿不到就**跳过**（exit 2，不算通过）。
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { buildSchema, FIELDS, GROUPS, groupOf } from '../plugins/qq-mode-console/lib/schema.js';
+import { resolveDshApp, exitSkipped } from './dsh-app-path.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, '..');
-const DSH_APP = 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\DSH Desktop\\resources\\app';
+// DSH 自带的 schemastery 在哪：不写死用户名（换机器就废，还会把本机路径带进仓库）——见 scripts/dsh-app-path.mjs
+const DSH_APP = resolveDshApp();
 
 const require_ = createRequire(import.meta.url);
 let z;
@@ -33,8 +35,7 @@ try {
   try {
     z = createRequire(path.join(DSH_APP, 'package.json'))('@deepseek-ai/schemastery');
   } catch (error) {
-    console.log(`⚠️ 找不到 schemastery（${error?.message ?? error}），跳过`);
-    process.exit(0);
+    exitSkipped(`找不到 schemastery（${error?.message ?? error}）`);
   }
 }
 

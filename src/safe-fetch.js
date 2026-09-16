@@ -98,10 +98,25 @@ export function isPrivateIp(ip) {
       if (isPrivateIp(ipv4)) return true;
     }
     if (h.startsWith('ff')) return true;
-    return false;
+    // 兜底：不论哪种 IPv6 前缀，只要低 32 位落在私网段就当私网。
+    // 覆盖 IPv4-mapped 的全展开写法（例如 0:0:0:0:0:ffff:7f00:1）—— 只认前缀会漏掉它。
+    const tail = h.split(':').filter((s) => s !== '');
+    if (tail.length >= 2) {
+      const hi = parseInt(tail[tail.length - 2] || '0', 16);
+      const lo = parseInt(tail[tail.length - 1] || '0', 16);
+      if (Number.isFinite(hi) && Number.isFinite(lo)) {
+        const n = ((hi & 0xffff) << 16) + (lo & 0xffff);
+        const ipv4 = `${(n >>> 24) & 255}.${(n >>> 16) & 255}.${(n >>> 8) & 255}.${n & 255}`;
+        if (isPrivateIp(ipv4)) return true;
+      }
+    }
+    // 判不出来一律当私网（fail-closed）：宁可误拦 IPv6 公网地址，
+    // 也不能把本机/内网放过去（SSRF 的代价高得多）。
+    return true;
   }
 
-  return false;
+  // 既不是合法 v4 也不是合法 v6：认不出来 → 也按私网处理（fail-closed）。
+  return true;
 }
 
 export async function resolveSafeHost(hostname) {

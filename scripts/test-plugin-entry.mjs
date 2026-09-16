@@ -42,8 +42,9 @@ const dirs = fs
   .sort();
 
 if (dirs.length === 0) {
-  console.log('⚠️ plugins/ 下没有插件目录，跳过');
-  process.exit(0);
+  // 退出码 2 = 跳过（本支没有验证任何东西）—— 别用 0 冒充"全绿"（2026-09-16 审计）。
+  console.log('⚠️ 跳过（本支未验证任何东西）：plugins/ 下没有插件目录 —— 仓库结构不对？');
+  process.exit(2);
 }
 
 console.log(`=== 插件入口冒烟：${dirs.length} 个（${dirs.join(', ')}）===`);

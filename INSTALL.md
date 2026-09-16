@@ -28,7 +28,7 @@ QQ 私聊消息 → SnowLuma(注入 QQ 客户端, OneBot v11) → 本桥接进�
 |---|---|---|
 | **DSH Desktop** | 宿主。agent 会话、设置页、MCP、插件都由它拉起 | 你的电脑（官方安装包） |
 | **SnowLuma** | 把 QQ 变成 OneBot v11 接口（DLL 注入 `QQ.exe`） | 你的电脑（`C:\SnowLuma`） |
-| **本仓库 qq-bridge** | 桥接进程 + DSH 插件 + 2 个 agent preset | 任意目录（本文用 `D:\dk\qq-bridge`） |
+| **本仓库 qq-bridge** | 桥接进程 + DSH 插件 + 2 个 agent preset | 任意目录（下文用 `<仓库目录>` 表示） |
 
 ---
 
@@ -125,11 +125,12 @@ cp config.example.json config.json      # Windows CMD: copy config.example.json 
 | `dsh.baseUrl` / `dsh.token` / `dsh.harnessLog` | DSH 接线 | **留默认即可**：桥接每 30s 从 `harness.log` 自动发现 DSH 的 URL 与新令牌 |
 | `notifyTaskDone` / `notifyTaskDoneMinTurnMs` | 「DSH 任务完成」通知 | 默认只通知跑够 **5 分钟**的回合，避免日常一问一答也 ping 你 |
 | `relayApprovalsToOwner` | 把 DSH 里的审批转发到 QQ | 默认开：你人在外面也能用手机批权限 |
+| `relayQuestionsToOwner` | 把 DSH 里的**提问（含选项）**转发到 QQ | 默认开：你在 DSH 界面里自己开的会话里 agent 问你的选项会发到手机，回 `1/2/3`、选项原文或自定义文字都能作答（多问题用 `\|` 分隔） |
 | `sessionCwd` | QQ 会话的工作目录 | 留空 = 每个会话在 `state/agents/<key>` 下建独立目录 |
 | `security.interceptNotify` | 安全拦截时是否通知你 | 默认开 |
 
 > `config.json` 和 `state/` 都含密钥/运行时数据，**已被 `.gitignore` 排除，绝不入库**。
-> 完整字段表（140 项）在 `plugins/qq-mode-console/lib/schema.js`，装好后能在 DSH 设置页里可视化改。
+> 完整字段表（148 项）在 `plugins/qq-mode-console/lib/schema.js`，装好后能在 DSH 设置页里可视化改。
 
 ---
 
@@ -209,7 +210,7 @@ node scripts/test-wake.mjs --no-send    # 冷启动链路自测（不发 QQ 消�
 | `node scripts/test-no-group.mjs` | **群聊已彻底移除、私聊不受影响**（起隔离实例 + 假 OneBot） | 21 项全 ✓ |
 | `node scripts/test-wake-lock.mjs` | **实例锁自愈**（pid 被复用也不会卡住启动） | 11 项全 ✓ |
 | `node scripts/test-plugin-entry.mjs` | 插件入口能 import（写错会让整个 harness 起不来） | 全部通过 |
-| `node scripts/test-qq-settings.mjs` | 设置字段表 ↔ schema ↔ `config.json` 一致 | 140 项、全通过 |
+| `node scripts/test-qq-settings.mjs` | 设置字段表 ↔ schema ↔ `config.json` 一致 | 148 项、全通过 |
 | `node scripts/test-qq-settings-page.mjs` | 设置页 SSR 渲染 | 全通过 |
 | `node scripts/test-settings-merge.mjs` | 设置覆盖规则（只覆盖你改过的字段） | 24 项全通过 |
 | `node scripts/test-wake-fence.mjs` | 唤醒路由的**信任围栏**（DNS 重绑定等） | 38 项全通过 |
@@ -225,9 +226,13 @@ node scripts/test-wake.mjs --no-send    # 冷启动链路自测（不发 QQ 消�
 
 ## 8. 装好之后怎么用
 
-- **改配置**：首选 DSH **设置 → 「通用设置」正下方「QQ 机器人」**（140 个字段，每项带中文说明）。
+- **改配置**：首选 DSH **设置 → 「通用设置」正下方「QQ 机器人」**（148 个字段，每项带中文说明）。
   优先级：**设置页里改过的字段 > `config.json` > 控制台改的值 > 代码默认值**。
   桥接每 5 秒拉一次，改完基本立刻生效（`consolePort`、`snowluma` 这类接线项要重启桥接）。
+- **改性格 / 说话语气**：同一分区的 **「性格与人设」组** —— 名字·自称、性格、说话语气、说话方式、
+  口头禅与习惯、禁忌，共 6 格 + 1 个总开关。**填了才注入，六格全留空 = 一个字都不改**；
+  与 `roles/<角色>.md` 那张角色卡叠加（角色卡在前当背景，性格设置在后，冲突时以它为准）。
+  改完 5 秒生效，不用去动 `dsh/agent-presets/` 里的人设文件。
 - **本地控制台**：`http://127.0.0.1:3100`（访问令牌在 `state/console-token`）。可看活动日志、改白名单、
   切运行模式（`chat` / `closed-agent` / `reserved` / `reserved2`）、管角色卡与黑话库。
 - **聊天侧管理命令**（只有 `ownerQQ` 能用）：`/reset` 重置上下文、`/status` 看状态、
@@ -251,16 +256,39 @@ DSH 的插件市场（第三方插件 `dshmarket`）判定「已安装」的依�
 # 1) profile 依赖里加一行本地链接（pnpm 只建符号链接，不会去仓库拉取、不跑构建脚本）
 #    注意 link: 必须同盘相对路径，所以先在 profile 里建一个指向本仓库的 junction
 $WEB = "$env:APPDATA\dsh-desktop\harness\profiles\web"
-New-Item -ItemType Junction -Path "$WEB\.dev-links\qq-bridge" -Target "D:\dk\qq-bridge"
-New-Item -ItemType Junction -Path "$WEB\node_modules\qq-bridge" -Target "D:\dk\qq-bridge"
+New-Item -ItemType Junction -Path "$WEB\.dev-links\qq-bridge" -Target "<仓库目录>"
+New-Item -ItemType Junction -Path "$WEB\node_modules\qq-bridge" -Target "<仓库目录>"
 # 然后在 $WEB\package.json 的 dependencies 里加： "qq-bridge": "link:.dev-links/qq-bridge"
 ```
 
-**刻意不做的事**：不把 `qq-bridge` 加进 `dsh.profile.bundles`。
-插件仍由 profile 的 `cordis.patch.yml`（`setup-dsh.mjs` 写的 `file://` 行）挂载，运行行为一个字都不变；
-加进 `bundles` 会变成重复挂载，而且必须重启 DSH 才生效。
+**能不能不进 `dsh.profile.bundles`？做不到 —— 见下面那条补记。**
+插件实际仍由 profile 的 `cordis.patch.yml`（`setup-dsh.mjs` 写的 `file://` 行）挂载，
+bundle 层只多出一个 `qq-bridge-host` 宿主行（只在启动时打一条 config.json 提示，零业务功能）。
+
+> 🚨 **2026-09-15 补记：`bundles` 那一条你拦不住，别白费劲手改。**
+> DSH Desktop 启动时有自愈逻辑 `healProfileBundles()`（`resources/app/out/main/index.js:9908`）：
+> 它遍历 profile 的 `dependencies`，把**每一个**「已装在 `profiles/<p>/node_modules/` 里、
+> 且 `package.json` 声明了 `dsh.bundle`」的依赖**自动补进** `dsh.profile.bundles` 并重写
+> profile 的 `package.json`。所以只要 qq-bridge 还是 profile 的依赖，它就一定在 `bundles` 里，
+> 手改回去下次启动照样写回来（实测：改完 2 分钟被写回，字节数一模一样）。
+>
+> 于是**必须**改成：根目录 `cordis.patch.yml`（bundle 层）**不插** `qq-mode-console` /
+> `qq-wake`，只留 `qq-bridge-host`；两个 UI 插件只由 profile patch 层的 `file://` 行挂载。
+> 否则同 id 插两遍，DSH 启动即抛
+> `dsh: plugin tree failed to load: ... duplicate loader entry id: qq-mode-console`，
+> **整个 harness 起不来**（不是降级，是界面直接打不开）。
+>
+> 为什么 UI 插件必须留在 `file://` 一侧、不能改由 bundle 层用包内子路径挂：
+> `dsh-client-modules` 的 `exactPackageSpecifier()` 只认「裸包名 / `@scope/name`」，
+> 对 `qq-bridge/plugins/qq-mode-console` 这种带子路径的 specifier 返回 `undefined`
+> （`dsh-client-modules/lib/index.js:132-138`），客户端半侧会被**静默跳过** ——
+> 宿主半侧照常加载、日志一切正常，但设置页「QQ 机器人」卡片和侧边栏「唤醒」按键凭空消失。
+>
+> `node scripts/setup-dsh.mjs` 现在每次做一次只读体检 `checkLayerOverlap()`：
+> 只要两层出现同 id 就直接告警并给修法。
 
 **回滚**：删掉 `package.json` 里那一行依赖 + 两个 junction 即可（`setup-dsh.mjs` 每次也会自动备份 profile 的 `package.json`）。
+代价是市场不再把它列为「已安装」；功能一个都不少（插件本来就是 patch 层挂的）。
 
 > ⚠️ 这只让**本机市场**把它当成已安装插件。想在市场的**目录**里搜到它（对所有人可见），
 > 需要往第三方精选列表 [`awesome-dsh-plugin`](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)
@@ -335,7 +363,7 @@ qq-bridge/
 ├─ src/bridge.js             主程序（事件处理/会话映射/控制台 HTTP/social 仿真）
 ├─ src/dsh-client.js         DSH 0.1.2 客户端（鉴权、端点、事件流 mux）
 ├─ src/mcp-*.js              3 个 MCP server（给 agent 的工具/宿主控制/网页搜索）
-├─ plugins/qq-mode-console/  DSH 设置页「QQ 机器人」（140 个字段）
+├─ plugins/qq-mode-console/  DSH 设置页「QQ 机器人」（148 个字段，含「性格与人设」组）
 ├─ plugins/qq-wake/          DSH 侧边栏「唤醒」按键（含实例锁自愈）
 ├─ dsh/agent-presets/        两个 agent preset（人格/权限边界在这）
 ├─ roles/                    角色卡（改文件即生效）

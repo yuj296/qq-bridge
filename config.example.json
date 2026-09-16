@@ -30,6 +30,15 @@
   "sendDelayMs": 300,
   "questionTimeoutMs": 300000,
   "consolePort": 3100,
+  "persona": {
+    "enabled": true,
+    "name": "",
+    "personality": "",
+    "tone": "",
+    "speechStyle": "",
+    "habits": "",
+    "taboo": ""
+  },
   "consoleToken": "",
   "security": {
     "interceptNotify": true

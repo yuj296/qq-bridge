@@ -18,7 +18,10 @@ const SKIP_DIRS = new Set(['node_modules', '.git', 'state', '.npm-cache']);
 const PATTERNS = [
   { name: 'DSH 启动令牌', re: /[?&]token=[A-Za-z0-9_-]{20,}/ },
   { name: '形如 SnowLuma accessToken 的长随机串', re: /\baccessToken"?\s*[:=]\s*"[A-Za-z0-9_-]{24,}"/ },
-  { name: '疑似本机绝对路径（发布版应避免）', re: /[A-Z]:\\Users\\[^\\\s]+/ },
+  // ⚠️ 源码里的路径字面量通常是**双反斜杠**（转义写法），只匹配单反斜杠会全部漏判。
+  // 2026-09-16 审计实测：这条曾经对 4 个真实命中文件 test()=false，于是发布前自检报"干净"，
+  // 本机路径就这样被推上了公开仓库。所以这里 \\{1,2} 两种写法都认。
+  { name: '疑似本机绝对路径（发布版应避免）', re: /[A-Za-z]:\\{1,2}Users\\{1,2}[^\\\s"']+/ },
 ];
 
 // 文档和示例配置里到处都是占位 QQ 号，别把它们当泄露。
@@ -50,6 +53,44 @@ function collectSecretsFromConfig() {
 }
 
 const secrets = collectSecretsFromConfig();
+
+// 本机真实路径（从环境变量与 config.json 推导）—— 比上面那条通用模式更准，
+// 能抓到 用户目录 / 仓库所在目录 / SnowLuma 安装目录 这类"只有这台机器才成立"的字符串。
+// 同一个路径在源码里可能写成单反斜杠，也可能写成双反斜杠（转义），两种都要查。
+// 标准/约定路径：不是本机隐私，出现在仓库里是正常的（SnowLuma 官方默认安装目录、Windows 系统目录）。
+// 注意这里只放**约定**，不放仓库自身所在目录 —— 工作区路径仍应算本机信息。
+const ALLOWED_LOCAL_PATH_RES = [
+  /^[a-z]:\\snowluma(\\|$)/i,
+  /^[a-z]:\\program files( \(x86\))?(\\|$)/i,
+  /^[a-z]:\\windows(\\|$)/i
+];
+const isConventionalPath = (value) => ALLOWED_LOCAL_PATH_RES.some((re) => re.test(value));
+
+function collectLocalPaths() {
+  const out = new Set();
+  const add = (value) => {
+    const v = String(value ?? '').trim().replace(/[\\/]+$/, '');
+    if (v.length >= 6 && /[\\/]/.test(v) && !isConventionalPath(v)) out.add(v);
+  };
+  add(ROOT);
+  add(process.env.USERPROFILE);
+  add(process.env.LOCALAPPDATA);
+  add(process.env.APPDATA);
+  add(process.env.ProgramFiles);
+  add(process.env['ProgramFiles(x86)']);
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+    for (const key of ['homeDir', 'launcherPath']) add(cfg?.snowluma?.[key]);
+  } catch { /* 没有 config.json 就只靠环境变量 */ }
+  return [...out];
+}
+const localPaths = collectLocalPaths();
+/** 同一路径的两种写法（原样 + 双反斜杠转义），命中任一即算。 */
+function pathVariants(value) {
+  const escaped = value.replace(/\\/g, '\\\\');
+  return escaped === value ? [value] : [value, escaped];
+}
+
 const hits = [];
 
 function walk(dir) {
@@ -81,6 +122,12 @@ function walk(dir) {
     for (const secret of secrets) {
       const idx = text.indexOf(secret);
       if (idx >= 0) hits.push({ rel, line: text.slice(0, idx).split('\n').length, name: 'config.json 中的真实凭据', sample: `${secret.slice(0, 6)}…` });
+    }
+    for (const localPath of localPaths) {
+      const hit = pathVariants(localPath).find((variant) => text.includes(variant));
+      if (hit !== undefined) {
+        hits.push({ rel, line: text.slice(0, text.indexOf(hit)).split('\n').length, name: '本机路径（环境/配置推导）', sample: `${hit.slice(0, 30)}…` });
+      }
     }
   }
 }

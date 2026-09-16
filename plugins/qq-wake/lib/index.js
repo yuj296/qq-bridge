@@ -6,7 +6,8 @@
 //
 // 信任围栏：只接受本机（loopback）请求 + 同源标记。唤醒会启动进程并真的发一条 QQ
 // 消息，虽然内容无害，但没有理由让局域网里的别人触发。
-import { runWake, probeStatus, readBridgeConfig, BRIDGE_DIR } from './wake.js';
+import net from 'node:net';
+import { runWake, probeStatusSummary, readBridgeConfig, BRIDGE_DIR } from './wake.js';
 
 /** 插件名（cordis 行的稳定标识）。 */
 export const name = 'qq-wake';
@@ -43,8 +44,11 @@ function bareHostname(hostHeader) {
   const host = String(hostHeader ?? '').trim().toLowerCase();
   if (!host) return '';
   if (host.startsWith('[')) {
-    const end = host.indexOf(']');
-    return end < 0 ? '' : host.slice(1, end);
+    // 方括号形式必须严格是 `[地址]` 或 `[地址]:端口`。
+    // 以前只找 `]` 再切片，于是 `[::1]evil.com` 会被剥成 `::1` 直接放行 ——
+    // 任何残余字符都不能容忍，剥不干净就返回空（= 判为非本机）。
+    const matched = /^\[([0-9a-fA-F:.]+)\](?::\d+)?$/.exec(host);
+    return matched ? matched[1] : '';
   }
   // 只有一个冒号才是「主机:端口」；多于一个是没加方括号的 IPv6 字面量。
   const first = host.indexOf(':');
@@ -52,12 +56,53 @@ function bareHostname(hostHeader) {
   return host.slice(0, first);
 }
 
-/** IPv4 回环 127/8、IPv6 ::1、IPv4-mapped ::ffff:127/8（socket 地址由 Node 给出，必为字面量）。 */
+/**
+ * IPv6 地址 → 8 段 16 位数值（``::`` 展开、尾部 IPv4 写法按两段算）。
+ * 解析不了返回 null。**判等必须走数值**：`0:0:0:0:0:0:0:1` 和 `::1` 是同一个地址，
+ * 比字面量字符串会把非规范写法的回环地址判成外网。
+ */
+function ipv6Segments(value) {
+  const parts = String(value ?? '').split('::');
+  if (parts.length > 2) return null;
+  const toSegments = (text) => {
+    if (text === '') return [];
+    const out = [];
+    for (const piece of text.split(':')) {
+      if (piece.includes('.')) {
+        const octets = piece.split('.').map(Number);
+        if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+        out.push((octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/.test(piece)) return null;
+        out.push(Number.parseInt(piece, 16));
+      }
+    }
+    return out;
+  };
+  const head = toSegments(parts[0]);
+  const tail = parts.length === 2 ? toSegments(parts[1]) : [];
+  if (head === null || tail === null) return null;
+  if (parts.length === 1) return head.length === 8 ? head : null;
+  const fill = 8 - head.length - tail.length;
+  if (fill < 0) return null;
+  return [...head, ...new Array(fill).fill(0), ...tail];
+}
+
+/** IPv6 回环：归一化后逐段比较 —— `::1`、`0:0:0:0:0:0:0:1`、`::0.0.0.1` 都算。 */
+function isLoopbackIpv6(value) {
+  const segments = ipv6Segments(value);
+  if (segments === null || segments.length !== 8) return false;
+  // IPv4-mapped（::ffff:a.b.c.d）按内嵌的 IPv4 判，否则 127/8 会被当成外网。
+  const isMapped = segments.slice(0, 5).every((n) => n === 0) && segments[5] === 0xffff;
+  if (isMapped) return isLoopbackIpv4(`${segments[6] >> 8}.${segments[6] & 0xff}.${segments[7] >> 8}.${segments[7] & 0xff}`);
+  return segments.slice(0, 7).every((n) => n === 0) && segments[7] === 1;
+}
+
+/** IPv4 回环 127/8、IPv6 回环 ::1（含零压缩与非规范写法）、IPv4-mapped ::ffff:127/8。 */
 function isLoopbackAddress(address) {
-  let value = String(address ?? '').trim().toLowerCase();
+  const value = String(address ?? '').trim().toLowerCase();
   if (!value) return false;
-  if (value.startsWith('::ffff:')) value = value.slice(7);
-  if (value === '::1') return true;
+  if (net.isIPv6(value)) return isLoopbackIpv6(value);
   return isLoopbackIpv4(value);
 }
 
@@ -67,11 +112,10 @@ function isLoopbackAddress(address) {
  * 这类「借前缀伪装」的域名一律拒绝。
  */
 export function isLoopbackHostname(hostHeader) {
-  let bare = bareHostname(hostHeader);
+  const bare = bareHostname(hostHeader);
   if (!bare) return false;
-  if (bare.startsWith('::ffff:')) bare = bare.slice(7);   // IPv4-mapped IPv6 字面量
-  if (bare === 'localhost' || bare === '::1') return true;
-  return isLoopbackIpv4(bare);
+  if (bare === 'localhost') return true;
+  return isLoopbackAddress(bare);
 }
 
 /**
@@ -84,8 +128,10 @@ export function passFence(req, write) {
   if (!isLoopbackAddress(req.socket?.remoteAddress)) return '只允许本机访问';
   if (!isLoopbackHostname(req.headers?.host)) return 'Host 不是本机';
   if (write) {
-    const ctype = String(req.headers?.['content-type'] ?? '').toLowerCase();
-    if (!ctype.includes('application/json')) return '写操作必须是 application/json';
+    // 只认「主类型恰好是 application/json」：用 includes 的话
+    // `text/plain, application/json` 这种多值头也会被放过。
+    const ctype = String(req.headers?.['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+    if (ctype !== 'application/json') return '写操作必须是 application/json';
   }
   const site = String(req.headers?.['sec-fetch-site'] ?? '');
   if (site && site !== 'same-origin' && site !== 'none') return '跨站请求被拒绝';
@@ -151,7 +197,8 @@ export function apply(ctx, config = {}) {
         if (denied) return writeJson(res, 403, { ok: false, error: denied });
         if (req.method !== 'GET') return writeJson(res, 405, { ok: false, error: '只支持 GET' });
         try {
-          const status = await probeStatus(bridgeDir);
+          // 只回摘要：桥接 /api/status 的整份响应（ownerQQ、白名单、activity 日志）不下发。
+          const status = await probeStatusSummary(bridgeDir);
           writeJson(res, 200, { ok: true, ...status });
         } catch (error) {
           writeJson(res, 200, { ok: false, error: String(error?.message ?? error) });

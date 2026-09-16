@@ -54,14 +54,14 @@
 **判断守护到底死没死，看心跳文件，不要看任务状态**：
 
 ```powershell
-Get-Content D:\dk\qq-bridge\state\supervisor\supervisor.heartbeat   # 时间戳在走就是活着
+Get-Content <仓库目录>\state\supervisor\supervisor.heartbeat   # 时间戳在走就是活着
 ```
 
 ## 常用命令
 
 ```powershell
 # 看日志（实时跟随）
-Get-Content D:\dk\qq-bridge\state\supervisor\supervisor.log -Tail 30 -Wait
+Get-Content <仓库目录>\state\supervisor\supervisor.log -Tail 30 -Wait
 
 # 现在立刻启动守护（不用等下次登录）
 Start-ScheduledTask -TaskName 'DSH QQ Bot Supervisor'

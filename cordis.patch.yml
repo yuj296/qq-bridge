@@ -2,7 +2,7 @@
 #
 # 用途：当 qq-bridge 作为**标准 DSH 插件包**被安装（package.json 里的
 # `dsh.bundle.patch` 指向本文件）时，把它的插件行插进 profile 层。
-# 行的 name 用**包内子路径 specifier**（`qq-bridge/plugins/...`，见 package.json
+# 行的 name 用**包内子路径 specifier**（`qq-bridge/...`，见 package.json
 # 的 exports 映射），不写绝对路径，换机器也能用。
 
 # bundle 宿主行：加载 lib/index.js（零依赖，只在启动时检查 config.json 并给提示）
@@ -10,22 +10,35 @@
     - id: qq-bridge-host
       name: 'qq-bridge'
 
-# DSH 设置页「QQ 机器人」分区（140 个字段，host + client 两个半侧都在子包里）
-- insert:
-    - id: qq-mode-console
-      name: 'qq-bridge/plugins/qq-mode-console'
-      config: {}
-
-# 侧边栏「唤醒」按键（拉起 SnowLuma + 桥接进程 + 给主人发一句「睡醒了」）
-- insert:
-    - id: qq-wake
-      name: 'qq-bridge/plugins/qq-wake'
-      config: {}
-
-# 注意：三个 MCP server（mcp-snowluma-safe / mcp-host-server / mcp-web-search-safe）
-# **不在本文件里**。它们的行需要「启动桥接的那台机器上的 node 绝对路径 + 脚本绝对路径」，
+# ⚠️ 本文件**只放 qq-bridge-host 一行**。两个 UI 插件（qq-mode-console / qq-wake）
+# 刻意不放在这里，两条原因都是实测踩出来的（2026-09-15）：
+#
+# 1) 同 id 撞车会让 harness 直接起不来。
+#    profile 的 cordis.patch.yml 本来就用 file:// 挂着这两行（id 相同）。一旦 qq-bridge
+#    也被登记进 profile 的 `dsh.profile.bundles`，本文件就会被当成一个 bundle 层再应用
+#    一次 —— 同 id 被插两遍，DSH 直接抛
+#    `dsh: plugin tree failed to load: ... duplicate loader entry id: qq-mode-console`，
+#    整个 harness 起不来（不是降级，是打不开界面）。
+#    而 DSH Desktop 启动时的自愈 `healProfileBundles()`（out/main/index.js:9908）会把
+#    「装在 profile/node_modules 里 + 声明了 dsh.bundle」的**每一个依赖**自动补进
+#    `dsh.profile.bundles` 并重写 package.json —— 也就是说只要 qq-bridge 还是 profile 的
+#    依赖，bundle 层就一定会被应用，patch 层不能跟它抢 id。
+#
+# 2) 包内子路径 specifier 挂不出客户端半侧。
+#    `qq-bridge/plugins/qq-mode-console` 这种带子路径的 specifier，宿主半侧能正常加载，
+#    但 dsh-client-modules 的 exactPackageSpecifier() 只认「裸包名 / @scope/name」，
+#    带子路径一律返回 undefined（dsh-client-modules/lib/index.js:132-138），于是客户端
+#    半侧被静默跳过：设置页「QQ 机器人」卡片和侧边栏「唤醒」按键都不会出现。
+#    改成用 file:// 指向 lib/index.js 时属于 path-like 入口，才会按「最近的 package.json」
+#    找到 plugins/<name>/package.json（dsh.client.platform=web + exports["./client"]）。
+#
+# 结论：**bundle 层不得再插任何 patch 层已经插过的 id**。两个 UI 插件统一由 profile 的
+# cordis.patch.yml 用 file:// 挂载（`node scripts/setup-dsh.mjs` 负责写那一段，并按 id
+# 做重叠体检）；bundle 层只负责宿主行。
+#
+# 三个 MCP server（mcp-snowluma-safe / mcp-host-server / mcp-web-search-safe）
+# **也不在本文件里**。它们的行需要「启动桥接的那台机器上的 node 绝对路径 + 脚本绝对路径」，
 # 用包内相对路径写不出来（DSH 的 patch 目前没有可用的相对命令约定）。
 # 它们由 `node scripts/setup-dsh.mjs` 写进 profile 的 cordis.patch.yml ——
 # 那份脚本同时负责把 preset 复制到 <DSH_HOME>\.agent-presets\。
-# 也就是说：本文件描述的是「包自身的 UI 插件」，机器相关的接线仍归安装脚本，
-# 这也是本地（file:// 挂载）与将来（市场安装）两种方式的唯一差别。
+# 也就是说：本文件描述的是「包自身的宿主行」，UI 插件与机器相关的接线仍归安装脚本。

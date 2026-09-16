@@ -10,7 +10,10 @@
 //   只是把锚点钉在技能中心那一行下面。
 //
 // 纪律：本文件的 apply 绝不抛异常 —— 客户端插件 apply 抛出会让整个 Web 外壳启动失败。
-window.__ModuleLoader__.load({
+// 整个 load 都包在 try/catch 里：外壳（__ModuleLoader__）还没就绪时 load 自己就会抛，
+// 那条路径以前没人兜住，抛出去就是整个 Web 外壳起不来（本项目踩过这个坑）。
+try {
+  window.__ModuleLoader__.load({
   id: "qq-wake",
   factory: (require) => {
     var module = { exports: {} };
@@ -134,7 +137,14 @@ window.__ModuleLoader__.load({
      */
     function mountWakeEntry() {
       if (typeof document === "undefined") return () => {};
-      if (document.querySelector(ROW_SELECTOR) !== null) return () => {};
+      // 旧实例（客户端热更新 / 重复激活）残留的行：它的点击回调已经跟着旧模块一起失效了，
+      // 以前这里直接 return 空卸载函数 —— 结果是"按键盘在、点了没反应、新实例永远挂不上"。
+      // 现在先摘掉残留行再挂新行（同一时刻仍然只有一行）。
+      const stale = document.querySelector(ROW_SELECTOR);
+      if (stale !== null && stale.isConnected) {
+        console.warn("[qq-wake] 发现残留的旧按键行，先移除再挂载");
+        stale.remove();
+      }
       ensureCss();
 
       const entry = document.createElement("button");
@@ -189,25 +199,31 @@ window.__ModuleLoader__.load({
           flash("fail", LABEL_FAIL, 8000, "唤醒失败：" + (result?.error ?? "未知错误") + "\n\n" + describe(result));
         }
         // 状态回读一次，把最新链路状况写回 tooltip
+        // （宿主只回摘要字段：awake / bridgeOk / onebotNickname，桥接原始状态不下发）
         callStatus().then((status) => {
+          // 失败提示不能被这次状态回读盖掉（失败时 awake 也可能是 true 的"半醒"状态，
+          // 盖掉之后用户看到的就是"已唤醒"，而实际那一步是失败的）。
+          if (entry.dataset.qqwakeState === "fail") return;
           if (status?.ok === true && status.awake === true && !busy) {
-            const who = status.onebot?.login?.nickname ?? "";
+            const who = status.onebotNickname ?? "";
             entry.title = `已唤醒${who ? "：" + who : ""}（点一下再唤醒一次）`;
           }
-        }).catch(() => {});
+        }).catch((error) => console.warn("[qq-wake] 回读状态失败:", error));
       });
 
       let root;
       let placed = false;
+      // 先声明再赋值：tryPlace 里会引用它，早先是 const + 后置声明（靠"调用时机在声明之后"侥幸不炸 TDZ）。
+      let rootObserver;
       const tryPlace = () => {
         if (root !== undefined && !root.isConnected) {
-          rootObserver.disconnect();
+          rootObserver?.disconnect();
           root = undefined;
           placed = false;
         }
         if (placed) {
           if (document.body.contains(entry)) return;
-          rootObserver.disconnect();
+          rootObserver?.disconnect();
           root = undefined;
           placed = false;
         }
@@ -215,16 +231,18 @@ window.__ModuleLoader__.load({
         if (root === undefined) return;
         try {
           placed = placeEntry(root, entry);
-        } catch {
+        } catch (error) {
+          // 以前静默：锚点结构变了的话按键就永远不出现，而控制台一条日志都没有。
+          console.warn("[qq-wake] 插入侧边栏行失败（锚点可能已变）:", error);
           placed = false;
         }
-        if (placed) rootObserver.observe(root, { childList: true, subtree: true });
+        if (placed && rootObserver !== undefined) rootObserver.observe(root, { childList: true, subtree: true });
       };
       const waitObserver = new MutationObserver(() => {
-        try { tryPlace(); } catch {}
+        try { tryPlace(); } catch (error) { console.warn("[qq-wake] 等待锚点失败:", error); }
       });
       waitObserver.observe(document.body, { childList: true, subtree: true });
-      const rootObserver = new MutationObserver(() => {
+      rootObserver = new MutationObserver(() => {
         try {
           if (root === undefined || !root.isConnected) {
             placed = false;
@@ -232,7 +250,9 @@ window.__ModuleLoader__.load({
             return;
           }
           if (!root.contains(entry)) placed = placeEntry(root, entry);
-        } catch {}
+        } catch (error) {
+          console.warn("[qq-wake] 自愈重挂失败:", error);
+        }
       });
       tryPlace();
 
@@ -240,9 +260,9 @@ window.__ModuleLoader__.load({
       callStatus().then((status) => {
         if (status?.ok !== true) return;
         if (status.awake === true) {
-          const who = status.onebot?.login?.nickname ?? "";
+          const who = status.onebotNickname ?? "";
           entry.title = `机器人已唤醒${who ? "：" + who : ""}（点一下再唤醒一次）`;
-        } else if (status.bridge?.ok === true) {
+        } else if (status.bridgeOk === true) {
           entry.title = "机器人半醒：桥接在跑，但 QQ 没登录上（点一下试试）";
         } else {
           entry.title = "机器人未运行（点一下唤醒）";
@@ -250,8 +270,8 @@ window.__ModuleLoader__.load({
       }).catch(() => {});
 
       return () => {
-        try { waitObserver.disconnect(); } catch {}
-        try { rootObserver.disconnect(); } catch {}
+        try { waitObserver.disconnect(); } catch (error) { console.warn("[qq-wake] 卸载观察器失败:", error); }
+        try { rootObserver?.disconnect(); } catch (error) { console.warn("[qq-wake] 卸载观察器失败:", error); }
         if (revertTimer !== undefined) clearTimeout(revertTimer);
         entry.remove();
       };
@@ -281,4 +301,7 @@ window.__ModuleLoader__.load({
     exports.inject = inject;
     return module.exports;
   }
-});
+  });
+} catch (error) {
+  console.warn("[qq-wake] 客户端半侧加载失败:", error);
+}

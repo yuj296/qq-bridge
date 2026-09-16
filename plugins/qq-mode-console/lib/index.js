@@ -44,15 +44,20 @@ export const QqBotSchema = buildSchema(z);
 
 /**
  * 从 config.json 取 base 层：原样保留类型，剔除机密与 mode。
- * @returns {object} base 对象。
+ *
+ * 读失败时**不能**静默当成空 base：空 base 会让设置页 148 项全显示为空，
+ * 用户照着重填一遍就成了 148 条 user 覆盖（把 config.json 的真实值盖在下面）。
+ * 所以把失败也带出来，由 apply() 记日志、并由页面顶部给出提示。
+ * @returns {{ok: boolean, base: object, error: string}}
  */
 function readBase() {
   let raw;
   try {
     raw = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
   } catch (error) {
-    diag(`读 config.json 失败：${error?.message ?? error}`);
-    return {};
+    const message = error?.message ?? String(error);
+    diag(`读 config.json 失败：${message}`);
+    return { ok: false, base: {}, error: message };
   }
   const strip = (value, depth) => {
     if (Array.isArray(value)) return value.slice();
@@ -65,7 +70,7 @@ function readBase() {
     }
     return out;
   };
-  return strip(raw, 0);
+  return { ok: true, base: strip(raw, 0), error: '' };
 }
 
 export function apply(ctx, config = {}) {
@@ -76,20 +81,29 @@ export function apply(ctx, config = {}) {
       diag('settings service unavailable');
       return;
     }
-    const base = { ...readBase(), ...(config.base ?? {}) };
+    const fromConfig = readBase();
+    const base = { ...fromConfig.base, ...(config.base ?? {}) };
     const fields = FIELDS.length;
     const scope = settings.register(QQMODE_NAMESPACE, QqBotSchema, {
       base,
       applies: 'live'
     });
-    diag(`registered ${QQMODE_NAMESPACE}（${fields} 个字段，base 来自 ${CONFIG_FILE}）scope=${typeof scope}`);
+    if (!fromConfig.ok) {
+      // 读盘失败只降级、不打断宿主：页面照常出现，但每一项都会是空的 —— 必须把原因喊出来，
+      // 否则用户会以为配置丢了、照着重填一遍（那会变成 148 条 user 覆盖）。
+      diag(`已降级注册（空 base）：${fromConfig.error}`);
+      console.warn(`[qq-mode-console] 读不到 ${CONFIG_FILE}（${fromConfig.error}）：设置页会全部显示为空，请先修好配置文件再改，别照着重填`);
+    }
+    diag(`registered ${QQMODE_NAMESPACE}（${fields} 个字段，base 来自 ${CONFIG_FILE}${fromConfig.ok ? '' : '（读失败，base 为空）'}）scope=${typeof scope}`);
     console.log(`[qq-mode-console] active (namespace=${QQMODE_NAMESPACE}, fields=${fields}, groups=${Object.keys(GROUPS).length})`);
   } catch (error) {
     if (/already registered/i.test(String(error?.message ?? error))) {
       diag('qq-mode namespace already registered, skip');
       return;
     }
+    // 非「已注册」的意外（schema 不认识、设置服务只读…）只记日志并降级：
+    // 插件出错绝不能打断宿主 apply —— DSH 起不来比少一个设置页严重得多（qq-wake 同规矩）。
     diag(`register threw: ${error?.stack ?? error}`);
-    throw error;
+    console.warn(`[qq-mode-console] 注册设置命名空间失败，已跳过（设置页不可用，DSH 照常启动）: ${error?.message ?? error}`);
   }
 }

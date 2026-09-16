@@ -56,16 +56,38 @@ export function normalizeSlangEntry(raw) {
   };
 }
 
-export function loadSlang(file) {
+/**
+ * 读黑话库，并**区分「读不出来」与「库是空的」** —— 理由同 sticker-lib 的 readStickerStore：
+ * 解析失败被当成空库时，任何一次保存都会把损坏内容覆盖成空数组，用户攒的黑话条无声消失。
+ *
+ * @param {string} file 库文件路径。
+ * @returns {{ok: boolean, entries: Array, reason: string, missing: boolean}}
+ */
+export function readSlangStore(file) {
+  let text;
   try {
-    let text = fs.readFileSync(file, 'utf8');
-    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-    const parsed = JSON.parse(text);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map(normalizeSlangEntry).filter((e) => e.content);
-  } catch {
-    return [];
+    text = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { ok: true, entries: [], reason: '文件不存在（全新库）', missing: true };
+    return { ok: false, entries: [], reason: `读文件失败：${error?.message ?? error}`, missing: false };
   }
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  if (text.trim() === '') return { ok: true, entries: [], reason: '空文件（全新库）', missing: true };
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    return { ok: false, entries: [], reason: `JSON 解析失败：${error?.message ?? error}`, missing: false };
+  }
+  if (!Array.isArray(parsed)) {
+    return { ok: false, entries: [], reason: '内容不是数组（文件可能被写坏）', missing: false };
+  }
+  return { ok: true, entries: parsed.map(normalizeSlangEntry).filter((e) => e.content), reason: 'ok', missing: false };
+}
+
+/** 兼容旧用法：只要数组。**需要区分"坏了"与"空"时必须用 readSlangStore()。** */
+export function loadSlang(file) {
+  return readSlangStore(file).entries;
 }
 
 export function saveSlang(file, entries) {

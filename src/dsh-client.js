@@ -71,6 +71,23 @@ function harnessLogCandidates() {
   return [...new Set(out)];
 }
 
+/**
+ * 主机是不是「本机」：只认 IP 字面量回环（127.0.0.0/8、::1）与 localhost。
+ *
+ * 为什么必须校验：base 是从 harness.log 的**文本**里抠出来的，而日志路径可由
+ * `DSH_HARNESS_LOG` / `cfg.dsh.harnessLog` 指向任意文件 —— 不校验就等于
+ * 「把启动令牌与之后的会话 cookie 送到日志里写的任意地址」。
+ */
+function isLoopbackHost(hostname) {
+  const h = String(hostname ?? '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (h === 'localhost' || h === '::1') return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (!m) return false;
+  const parts = m.slice(1).map(Number);
+  if (parts.some((n) => n > 255)) return false;
+  return parts[0] === 127;
+}
+
 /** 从 harness.log 里取最后一次启动的 base 与 token。 */
 function discoverHarness(logFile) {
   const file = logFile || harnessLogCandidates().find((p) => fs.existsSync(p));
@@ -82,10 +99,20 @@ function discoverHarness(logFile) {
     return null;
   }
   let found = null;
-  const re = /dsh web:\s*(https?:\/\/[^\s?]+)\/?\?token=(\S+)/g;
-  for (const match of text.matchAll(re)) found = { base: match[1].replace(/\/+$/, ''), token: match[2], file };
+  // token 限长 + 字符白名单：日志里出现超长无空白串时不至于把它整段当令牌。
+  const re = /dsh web:\s*(https?:\/\/[^\s?]+)\/?\?token=([A-Za-z0-9_-]{8,512})/g;
+  for (const match of text.matchAll(re)) {
+    const base = match[1].replace(/\/+$/, '');
+    let host = '';
+    try { host = new URL(base).hostname; } catch { continue; }
+    if (!isLoopbackHost(host)) continue; // 非本机地址一律不认
+    found = { base, token: match[2], file };
+  }
   return found;
 }
+
+/** 被放弃的会话多久内不再被自动订阅（避免「建流→失败→30s 后再来一遍」的循环）。 */
+const UNTRACK_BACKOFF_MS = 5 * 60 * 1000;
 
 export class NodeApiClient {
   constructor(baseUrl, timeoutMs = 30000) {
@@ -93,11 +120,13 @@ export class NodeApiClient {
     this.explicitBase = String(baseUrl ?? '').trim() || null;
     this.explicitToken = process.env.DSH_HARNESS_TOKEN || null;
     this.harnessLog = null;
+    this.logger = null;            // 由 bridge 通过 configure({ logger }) 注入（见 #warn）
     this.cookie = null;
     this.authBase = null;
     this.tracked = new Set();
     this.trackListeners = new Set();
     this.liveSessions = new Set(); // 已确认 session/follow 生效（能收到事件）的会话
+    this.untrackedUntil = new Map(); // sessionId -> 退避截止时间（放弃订阅后的冷却期）
     this.readyWaiters = new Map(); // sessionId -> Set<resolve>：等 follow 生效的调用方
     this.mux = null;
     this.remoteClients = new Map(); // eventId -> { clientId, kind }
@@ -105,15 +134,27 @@ export class NodeApiClient {
     this.base = this.explicitBase || DEFAULT_BASE;
   }
 
-  /** 允许 bridge 显式指定令牌/harness.log（可选；默认自动发现）。 */
-  configure({ token, harnessLog, baseUrl } = {}) {
+  /**
+   * 允许 bridge 显式指定令牌 / harness.log / 日志出口（都可选；默认自动发现 + console）。
+   * `logger` 用来把内部告警接进桥接自己的日志（`state/bridge.log`）—— 不注入的话它们只会打到
+   * 桥接 stdout，排查时在日志文件里看不到。
+   */
+  configure({ token, harnessLog, baseUrl, logger } = {}) {
     if (token) this.explicitToken = String(token);
     if (harnessLog) this.harnessLog = String(harnessLog);
+    if (logger) this.logger = logger;
     if (baseUrl) {
       this.explicitBase = String(baseUrl).replace(/\/+$/, '');
       this.base = this.explicitBase;
     }
     return this;
+  }
+
+  /** 内部告警出口：bridge 注入 logger 就走它，否则退回 console。 */
+  #warn(message) {
+    const line = `[dsh-client] ${message}`;
+    if (this.logger && typeof this.logger.warn === 'function') this.logger.warn(line);
+    else console.warn(line);
   }
 
   resolveBase() {
@@ -133,8 +174,11 @@ export class NodeApiClient {
     if (!force && this.cookie && this.authBase === base) return this.cookie;
     const token = this.token;
     if (!token) {
+      let portHint = '未知';
+      try { portHint = new URL(base).port || '默认端口'; } catch {}
       throw new Error(
-        `DSH 启动令牌未知：请设置 dsh.token，或确保 DSH Desktop 的 harness.log 可读（已尝试：${harnessLogCandidates().join(', ')}）`,
+        `DSH 启动令牌未知（目标端口 ${portHint}）：请设置 dsh.token，或确保 harness.log 可读、`
+        + `且其中最后一条 dsh web: 记录的地址是本机回环（已尝试：${harnessLogCandidates().join(', ')}）`,
       );
     }
     const response = await fetch(`${base}/?token=${encodeURIComponent(token)}`, {
@@ -161,6 +205,9 @@ export class NodeApiClient {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      // 不跟随重定向：POST 体里是 prompt / 工具参数，跟着 30x 走会把 body 与
+      // 会话 cookie 一起送到别的源。
+      redirect: 'manual',
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (response.status === 401) {
@@ -172,6 +219,7 @@ export class NodeApiClient {
         method: 'POST',
         headers: retryHeaders,
         body: JSON.stringify(body),
+        redirect: 'manual',
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     }
@@ -228,6 +276,9 @@ export class NodeApiClient {
       } catch {
         return;
       }
+      // 帧形状校验：JSON.parse 对 "null"/"0" 也会成功，之后访问 message.streamId
+      // 就会在事件回调里抛 TypeError —— 那会把整个进程带走。
+      if (!message || typeof message !== 'object' || Array.isArray(message)) return;
       const stream = streams.get(message.streamId);
       if (!stream) return;
       if (message.type === 'item') stream.queue.push({ value: message.value });
@@ -248,6 +299,16 @@ export class NodeApiClient {
       streams.clear();
       if (this.mux === mux) this.mux = null;
     });
+    // 握手被 401 拒掉（DSH 重启后 cookie 必然失效）：把 cookie 作废，
+    // 这样下一次 openStream 的 authenticate() 会重新换一个；否则会拿着死 cookie
+    // 无限重连，表现成「一元调用正常、消息/提问全收不到」的半死状态。
+    ws.on('unexpected-response', (_req, res) => {
+      if (res?.statusCode === 401) {
+        this.cookie = null;
+        this.authBase = null;
+      }
+      try { res?.resume?.(); } catch {}
+    });
     this.mux = mux;
     return mux;
   }
@@ -266,13 +327,22 @@ export class NodeApiClient {
       queue.close();
     };
     signal?.addEventListener('abort', onAbort, { once: true });
-    const send = () => mux.ws.send(JSON.stringify({ type: 'open', streamId, endpoint, payload: { args } }));
+    const send = () => {
+      try {
+        mux.ws.send(JSON.stringify({ type: 'open', streamId, endpoint, payload: { args } }));
+      } catch {
+        queue.close(new Error('DSH 流载体不可写（/api/remote.mux 未就绪或已断开）'));
+      }
+    };
     if (mux.ws.readyState === WebSocket.OPEN) send();
     else mux.ws.once('open', send);
     try {
       for await (const item of queue) yield item.value;
     } finally {
       signal?.removeEventListener('abort', onAbort);
+      // socket 在 CONNECTING 期间被关掉时，这个 once('open') 会一直挂在死 socket 上
+      // （每条失败的 follow 累积一个监听器），所以退出一律摘掉。
+      try { mux.ws.off?.('open', send); } catch {}
       mux.streams.delete(streamId);
       try {
         if (mux.ws.readyState === WebSocket.OPEN) mux.ws.send(JSON.stringify({ type: 'cancel', streamId }));
@@ -306,6 +376,12 @@ export class NodeApiClient {
   untrackSession(sessionId) {
     const id = String(sessionId ?? '');
     if (!this.tracked.delete(id)) return;
+    // liveSessions 必须一起删：它缓存的是「follow 已生效」，留着会让
+    // waitForSessionReady 直接放行 prompt，而 follow 其实已经没了 →
+    // 开头的 turn/start 丢失（= 回复不发到 QQ 的那个已知失败模式）。
+    this.liveSessions.delete(id);
+    // 退避：被放弃的会话（多半已归档）短时间内别再被 discovery 重新订阅。
+    this.untrackedUntil.set(id, Date.now() + UNTRACK_BACKOFF_MS);
     this.#settleReadyWaiters(id, false);
     for (const listener of this.trackListeners) listener(id, false);
   }
@@ -376,9 +452,19 @@ export class NodeApiClient {
       try {
         const response = await this.sessions.list({});
         if (!response?.result?.ok) return;
+        const now = Date.now();
         for (const item of response.result.value?.items ?? []) {
           if (item?.parentSessionId) continue;
-          if (item?.sessionId) this.trackSession(item.sessionId);
+          const id = item?.sessionId;
+          if (!id) continue;
+          // 刚被放弃的会话先别订（见 untrackSession 的退避说明），否则会形成
+          // 「每 30 秒重新订阅一个已归档会话」的重连风暴。
+          const until = this.untrackedUntil.get(id);
+          if (until !== undefined) {
+            if (until > now) continue;
+            this.untrackedUntil.delete(id);
+          }
+          this.trackSession(id);
         }
       } catch {
         // DSH 没起来 / 重启中：下一轮再试
@@ -487,6 +573,9 @@ export class NodeApiClient {
           // 退避几次之后直接放弃这个会话。
           failures = gotItem ? 0 : failures + 1;
           if (failures >= 5) {
+            // 放弃订阅 = 该会话的 turn/end 再也不回来 → 它的回复永远不会转发到 QQ。
+            // 以前这里是完全静默的，排查时只能看到下游那句"回复没转发到 QQ"（2026-09-16 审计）。
+            this.#warn(`会话 ${sessionId} 连续 ${failures} 次没拿到任何事件，已放弃订阅（该会话的回复将不再经此链路回来）`);
             this.untrackSession(sessionId);
             break;
           }
@@ -542,7 +631,10 @@ export class NodeApiClient {
       clearTimeout(openFallback);
       root.abort();
       this.trackListeners.delete(onTrack);
-      await eventsTask.catch(() => {});
+      await eventsTask.catch((error) => {
+        // $events 流收尾时的异常以前被完全吞掉：通道为什么断在日志里看不到（2026-09-16 审计）。
+        this.#warn(`$events 流收尾异常（已忽略）：${error?.message ?? error}`);
+      });
     }
   }
 
@@ -588,10 +680,13 @@ export class NodeApiClient {
    * @returns 是否确实放弃了一个挂起请求
    */
   async delegatePending(rpcId) {
-    const known = this.remoteClients.get(String(rpcId ?? ''));
+    const id = String(rpcId ?? '');
+    const known = this.remoteClients.get(id);
     if (!known) return false;
-    this.remoteClients.delete(String(rpcId));
-    await this.#settleRemoteEvent(String(rpcId), known.clientId, { kind: 'next' });
+    // 先发再删：POST 失败时本地挂起仍在，调用方还能重试；
+    // 反过来（先删后发）一旦失败就永久失去这个挂起。
+    await this.#settleRemoteEvent(id, known.clientId, { kind: 'next' });
+    this.remoteClients.delete(id);
     return true;
   }
 
@@ -623,14 +718,21 @@ export class NodeApiClient {
     }
     const known = this.remoteClients.get(rpcId);
     if (!known) throw new Error(`respond: 未知的挂起请求 ${rpcId}（可能已超时或被取消）`);
-    this.remoteClients.delete(rpcId);
     if (known.kind === 'question') {
       const answer = value?.answer ?? { answers: [] };
+      // 先发再删：失败时保留挂起，调用方还能重试。
       await this.#settleRemoteEvent(rpcId, known.clientId, { kind: 'result', value: answer });
+      this.remoteClients.delete(rpcId);
       return { accepted: true };
     }
-    const outcome = value?.outcome === 'allowed-once' ? 'allowed-once' : 'rejected';
+    // 审批 outcome 只认协议定义的值：别的值宁可报错，也不要静默降级成「拒绝」
+    // —— 那等于替用户做了决定（与「不替用户作答」的不变量相反）。
+    const outcome = value?.outcome === 'allowed-once' ? 'allowed-once'
+      : value?.outcome === 'rejected' ? 'rejected'
+        : null;
+    if (!outcome) throw new Error(`respond: 未知的审批 outcome ${JSON.stringify(value?.outcome)}`);
     await this.#settleRemoteEvent(rpcId, known.clientId, { kind: 'result', value: outcome });
+    this.remoteClients.delete(rpcId);
     return { accepted: true };
   }
 
@@ -697,8 +799,15 @@ export class NodeApiClient {
 
 /** 把 RpcResponse 的结果槽解出来；业务错误直接抛出。 */
 export function unwrap(response, label) {
-  if (response.result.ok) return response.result.value;
-  const { code, message } = response.result.error;
+  // 信封缺字段（DSH 版本漂移 / 端口被别的进程顶替）时要给可读错误：
+  // 直接访问 response.result.ok 会抛 TypeError，在初始化路径上会把桥接打挂。
+  const result = response?.result;
+  if (!result || typeof result !== 'object') {
+    throw new Error(`${label} failed: 响应缺少 result 信封（DSH 版本不匹配？）`);
+  }
+  if (result.ok) return result.value;
+  const code = result.error?.code ?? 'unknown';
+  const message = result.error?.message ?? '（无错误详情）';
   throw new Error(`${label} failed: ${code}: ${message}`);
 }
 
@@ -708,6 +817,9 @@ export function createTurnCollector() {
   return {
     /** 处理一条 session/event，返回该事件是否终结了一个 turn（此时可取最终文本）。 */
     push(event) {
+      // 事件形状也可能畸形（协议漂移 / 端口被别的进程顶替）：缺 data 就直接忽略。
+      // 这个函数跑在事件流循环里，抛 TypeError 会把进程带走。
+      if (!event || typeof event !== 'object' || !event.data || typeof event.data !== 'object') return null;
       if (event.type === 'turn/start') {
         turns.set(event.data.turn, { text: '' });
         return null;

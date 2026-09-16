@@ -5,8 +5,10 @@
 //   1. 安装两套 agent preset：qq-chat、qq-chat-v2
 //   2. 在 DSH profile 的 cordis.patch.yml 中挂载三个 MCP server：
 //      mcp-snowluma / mcp-snowluma-host / mcp-web-search-safe
-//   3. 同一个 patch 层挂载 qq-mode-console 插件（DSH 设置页的 qq-mode 卡片）
+//   3. 同一个 patch 层挂载 qq-mode-console / qq-wake 两个 UI 插件（必须 file:// 形式）
 //   4. 兜底创建 state/mode.json
+//   5. 体检：仓库 bundle patch 与本脚本写的 patch 段有没有插同一个 loader entry id
+//      （同 id 会让 DSH 启动直接抛 duplicate loader entry id，harness 起不来）
 //
 // 用法：
 //   node scripts/setup-dsh.mjs [profile] [--dry-run]
@@ -25,11 +27,28 @@
 //   * 而 `dsh` CLI 在 DSH Desktop 环境下通常不在 PATH，那一步会被跳过，
 //     于是「登记了但没装」——正好落进上面那个失败模式。
 //
-// 新版改为：把 qq-mode-console 用 `file://` specifier 直接挂在用户 patch 层。
+// 新版改为：把 qq-mode-console / qq-wake 用 `file://` specifier 直接挂在用户 patch 层。
 //   Cordis loader 的 import(name) 对非 `.` 开头的 specifier 直接走动态 import，
 //   而 file:// URL 是合法 ESM specifier，因此无需装配/bundle 注册/pnpm install，
 //   也完全不碰 profile 的 package.json。插件通过仓库自带的 node_modules 解析
 //   `@deepseek-ai/schemastery`。移除时删掉 patch 里的对应条目即可，无残留。
+//
+//   ── 为什么**必须**是 file://，不能改成包内子路径 specifier（2026-09-15 实测）──────
+//   dsh-client-modules 定位客户端半侧时，会先算 exactPackageSpecifier(loaderName)：
+//   只有「裸包名」或「@scope/name」才有值，`qq-bridge/plugins/qq-mode-console` 这种
+//   带子路径的一律返回 undefined，随后 locatePkgJson() 直接 return undefined ——
+//   宿主半侧照常加载，客户端半侧被**静默跳过**，表现是设置页「QQ 机器人」卡片和
+//   侧边栏「唤醒」按键凭空消失（没有任何报错）。file:// 入口属于 path-like，才会按
+//   「最近的 package.json」找到 plugins/<name>/package.json（dsh.client.platform=web
+//   + exports["./client"]）。参见 dsh-client-modules/lib/index.js:132-138、651-716。
+//
+//   ── 为什么根目录 cordis.patch.yml 里不能再插这两个 id ──────────────────────────
+//   qq-bridge 作为 profile 依赖装着、又声明了 dsh.bundle，DSH Desktop 启动时的自愈
+//   `healProfileBundles()` 就会把它自动补进 `dsh.profile.bundles` 并重写 profile 的
+//   package.json（改一次写回一次，手改没用）。于是 bundle 层一定会应用
+//   `qq-bridge/cordis.patch.yml`：那里若也插 qq-mode-console / qq-wake，就会和本层
+//   同 id 撞车，DSH 抛 `duplicate loader entry id` 直接起不来。所以 bundle patch 只留
+//   宿主行 qq-bridge-host，`checkLayerOverlap()` 每次会做一次重叠体检。
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -175,6 +194,56 @@ function patchCordis() {
   log(`cordis.patch.yml 已写入: ${patchFile}`);
 }
 
+/** 从一段 patch 列表文本里抠出所有 `id:` 值。 */
+function collectEntryIds(text) {
+  const ids = new Set();
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^\s*-\s*id:\s*(\S+)\s*$/.exec(line);
+    if (m) ids.add(m[1]);
+  }
+  return ids;
+}
+
+/**
+ * 体检：仓库自己的 bundle patch（根目录 `cordis.patch.yml`，被 package.json 的
+ * `dsh.bundle.patch` 指向）和本脚本写进 profile patch 层的这一段，**有没有插同一个 id**。
+ *
+ * DSH 的插件树按「bundle 层 → 用户 patch 层 → --patch 覆盖层」依次应用，entry id 全局唯一；
+ * 同 id 插两遍会直接抛
+ * `dsh: plugin tree failed to load: ... duplicate loader entry id: <id>`，
+ * 整个 harness 起不来（实测 2026-09-15 就是这样挂的）。
+ *
+ * 而 bundle 层是**躲不开的**：只要 qq-bridge 是 profile 的依赖、又声明了 dsh.bundle，
+ * DSH Desktop 启动时的自愈 `healProfileBundles()`（out/main/index.js:9908）就会把它补进
+ * `dsh.profile.bundles` 并重写 profile 的 package.json —— 改一次写回去一次。
+ * 所以两个 UI 插件只能挂在 bundle patch **之外**的一侧。只读检查，不改任何文件。
+ */
+function checkLayerOverlap() {
+  const bundlePatchPath = path.join(REPO_ROOT, 'cordis.patch.yml');
+  let bundleIds;
+  try {
+    bundleIds = collectEntryIds(fs.readFileSync(bundlePatchPath, 'utf8'));
+  } catch (e) {
+    log(`体检跳过：读不动 ${bundlePatchPath}（${e.message}）`);
+    return;
+  }
+  const patchIds = collectEntryIds(patchBlock());
+  const overlap = [...patchIds].filter((id) => bundleIds.has(id));
+  if (overlap.length === 0) {
+    log(`体检 OK：bundle 层与 patch 层无同 id 重叠（bundle 层 ${bundleIds.size} 个 id，patch 层 ${patchIds.size} 个）`);
+    return;
+  }
+  console.error('');
+  console.error(`[setup-dsh] ⚠️  隐患：这些 id 同时出现在 bundle 层和 patch 层 —— ${overlap.join(', ')}`);
+  console.error('    bundle 层：cordis.patch.yml（qq-bridge 作为 bundle 被应用时）');
+  console.error('    patch 层：本脚本写进 profile cordis.patch.yml 的那一段');
+  console.error('    DSH 启动会报 "duplicate loader entry id: <id>"，harness 直接起不来。');
+  console.error('    修法：从其中一侧删掉重复的行。两个 UI 插件（qq-mode-console / qq-wake）');
+  console.error('    必须留在 patch 层的 file:// 一侧 —— 包内子路径 specifier 挂不出客户端半侧');
+  console.error('    （设置页卡片 / 侧边栏「唤醒」按键会消失）。详见 INSTALL.md 第 8.1 节。');
+  console.error('');
+}
+
 function ensureLocalModeFile() {
   const stateDir = path.join(REPO_ROOT, 'state');
   const modeFile = path.join(stateDir, 'mode.json');
@@ -200,6 +269,7 @@ copyPreset('qq-chat');
 copyPreset('qq-chat-v2');
 patchCordis();
 ensureLocalModeFile();
+checkLayerOverlap();
 
 console.log('');
 log('完成。下一步：');

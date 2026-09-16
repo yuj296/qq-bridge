@@ -69,6 +69,9 @@ fs.mkdirSync(path.join(TMP, 'state'), { recursive: true });fs.cpSync(path.join(R
 fs.writeFileSync(path.join(TMP, 'config.json'), JSON.stringify({
   ownerQQ: OWNER_QQ,
   snowluma: { wsUrl: `ws://127.0.0.1:${WS_PORT}`, httpUrl: `http://127.0.0.1:${HTTP_PORT}` },
+  // ⚠️ 这个实例**故意**连真 DSH —— 它要验「私聊发送链路真的通」，而那条链路需要 DSH 建会话。
+  // 与 test-persona.mjs 的取舍不同：那边断言配置值（必须与真 DSH 断开，见 AGENTS.md 坑 18），
+  // 这边只验消息流向，且雪花/OneBot 全部指向本脚本的假服务端，所以不会打扰主人、也不校验配置值。
   allow: { private: [OWNER_QQ] },
   deny: { private: [] },
   consolePort: 3110,

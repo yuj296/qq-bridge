@@ -25,7 +25,10 @@ const HTTP_PORT = 3211;
 const WS_PORT = 3212;
 const BASE = `http://127.0.0.1:${CONSOLE_PORT}`;
 const TOKEN = 'console-test-token-0123456789'; // 桥接要求 16~128 位 [A-Za-z0-9_-]
-const authHeaders = { 'x-console-token': TOKEN };
+// 管理端最敏感的写操作（改令牌/白名单/重启/清工作区）现在额外要求「同源 Origin 或
+// x-console-admin: 1」——目的是让持有控制台令牌的 MCP 子进程改不了这些。测试脚本以
+// 管理端身份调用，所以显式声明这个头。
+const authHeaders = { 'x-console-token': TOKEN, 'x-console-admin': '1' };
 const TEST_ROLE = '控制台自测人格Tmp';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

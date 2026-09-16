@@ -176,12 +176,14 @@ const pokeReg = regByName.get('qq_send_poke');
 ok(Boolean(pokeReg) && /key: z\.string\(\)/.test(pokeReg.schema) && !/targetUserId/.test(pokeReg.schema), 'qq_send_poke 只需要 key + token（私聊目标即会话自身）');
 
 console.log('\n## 群白名单 / 群接口已删（源码层）');
+// 白名单强制在桥接侧（src/bridge.js 的 modeAllowed / allow.private），本文件不再读 allow/deny；
+// 这里只断言「没有把群白名单读回来」，以及文件里明确写清了强制点在哪。
 ok(
   !src.includes('allowGroups') && !src.includes('denyGroups') &&
   !/allow\?\.groups/.test(src) && !/deny\?\.groups/.test(src),
   '不再读取 config.json 的 allow.groups / deny.groups'
 );
-ok(src.includes('allowPrivate') && src.includes('denyPrivate'), '私聊白名单 allow.private / deny.private 保留');
+ok(!/allow\?\.(private|groups)/.test(src) && src.includes('allow.private'), '私聊白名单只在桥接侧强制（本文件不再读 allow.private，注释里标明强制点）');
 ok(!/get_group_\w+/.test(src), '不再调用任何 OneBot 群接口（get_group_*）');
 ok(!src.includes("'group:") && !src.includes('`group:'), '不再构造 group: 会话 key');
 
@@ -251,23 +253,31 @@ async function liveProbe() {
         arguments: { groupId: 123456789, message: '测试', token: 'x', messages: ['测试'] }
       });
     }
-    // 目标 987654321 是编造号（allow.private 里只有 owner）：closed-agent 只放行 owner 私聊，
+    // 发送类工具的 token 现在是必填（与「每个工具调用都必须带 agent token」一致）：
+    // 统一带一个假令牌，好让调用真的走到桥接侧的安全层，而不是被 schema 校验提前挡下。
+    const FAKE_TOKEN = 'test-token-not-real';
+    // 目标 987654321 是编造号（allow.private 里只有 owner）：reserved2 下 agent token 校验先失败，
     // 其余模式发送类工具直接 403 —— 只会看到 isError，不会真的发消息出去。
     calls.sendPrivate = await rpc(nextId++, 'tools/call', {
       name: 'qq_send_private_message',
-      arguments: { userId: 987654321, message: '测试' }
+      arguments: { userId: 987654321, message: '测试', token: FAKE_TOKEN }
     });
     calls.replyInvalid = await rpc(nextId++, 'tools/call', {
       name: 'qq_reply',
-      arguments: { userId: 987654321, replyToMessageId: 'abc', message: '测试' }
+      arguments: { userId: 987654321, replyToMessageId: 'abc', message: '测试', token: FAKE_TOKEN }
     });
     calls.replyZero = await rpc(nextId++, 'tools/call', {
       name: 'qq_reply',
-      arguments: { userId: 987654321, replyToMessageId: 0, message: '测试' }
+      arguments: { userId: 987654321, replyToMessageId: 0, message: '测试', token: FAKE_TOKEN }
     });
     calls.replyNegative = await rpc(nextId++, 'tools/call', {
       name: 'qq_reply',
-      arguments: { userId: 987654321, replyToMessageId: -123456789, message: '测试' }
+      arguments: { userId: 987654321, replyToMessageId: -123456789, message: '测试', token: FAKE_TOKEN }
+    });
+    // 不带 token 必须被拒：schema 层就该挡住（agent token 是硬要求）。
+    calls.sendPrivateNoToken = await rpc(nextId++, 'tools/call', {
+      name: 'qq_send_private_message',
+      arguments: { userId: 987654321, message: '测试' }
     });
 
     return {
@@ -322,11 +332,16 @@ if (!live) {
   const sendText = String(sendRes.content?.[0]?.text ?? live.calls.sendPrivate?.error?.message ?? '');
   ok(sendRes.isError === true, '实时：白名单外私聊发送被拒绝', sendText.slice(0, 120));
 
-  const invalidText = String(live.calls.replyInvalid?.result?.content?.[0]?.text ?? '');
+  // token 必填：不带 token 的调用必须在 schema 层就被拒（不能靠桥接兜底）。
+  const noToken = live.calls.sendPrivateNoToken ?? {};
+  const noTokenText = String(noToken?.result?.content?.[0]?.text ?? noToken?.error?.message ?? '');
+  ok(Boolean(noToken?.error) || noToken?.result?.isError === true, '实时：qq_send_private_message 缺 token 被拒', noTokenText.slice(0, 120));
+
+  const invalidText = String(live.calls.replyInvalid?.result?.content?.[0]?.text ?? live.calls.replyInvalid?.error?.message ?? '');
   ok(live.calls.replyInvalid?.result?.isError === true, '实时：qq_reply 非法引用 id(abc) 被拒绝', invalidText.slice(0, 120));
-  const zeroText = String(live.calls.replyZero?.result?.content?.[0]?.text ?? '');
+  const zeroText = String(live.calls.replyZero?.result?.content?.[0]?.text ?? live.calls.replyZero?.error?.message ?? '');
   ok(live.calls.replyZero?.result?.isError === true, '实时：qq_reply 引用 id(0) 被拒绝', zeroText.slice(0, 120));
-  const negText = String(live.calls.replyNegative?.result?.content?.[0]?.text ?? '');
+  const negText = String(live.calls.replyNegative?.result?.content?.[0]?.text ?? live.calls.replyNegative?.error?.message ?? '');
   ok(live.calls.replyNegative?.result?.isError === true, '实时：qq_reply 负 id 被安全层拒绝（参数校验已放行）', negText.slice(0, 120));
   ok(!/必须是非零整数/.test(negText), '实时：负 id 未被当成非法参数', negText.slice(0, 120));
 }

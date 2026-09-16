@@ -253,6 +253,55 @@ node scripts/fake-onebot.mjs                       # 假的 OneBot 服务端（�
 
 ---
 
+## 5.2 提问转发到手机（agent 问你选项时也能在 QQ 上答）
+
+**需求**（2026-09-15）：主人在 DSH 界面里自己开的任务（编码会话等）中，agent 常用询问工具
+问「选哪个方案」。人不在电脑前时看不到那些选项，任务就卡在那儿。
+
+**为什么以前不行**：`question/requested` 分支只有「映射到 QQ 会话」的会话才会发 QQ
+（`const key = reverse.get(frame.sessionId); if (!key) continue;`）。`qq-chat*` preset 不带本地
+工具、基本不会提问；而你自己在 DSH 里开的会话**没有 QQ 映射**，提问被直接丢掉。
+审批有 `relayApprovalsToOwner` 兜这条链路，**提问没有对应的开关** —— 这才是缺的那块。
+
+**实现**：
+
+1. 新增 `src/question-flow.js`（纯函数，便于单测）：
+   - 渲染：带序号的选项、**选项的详细说明（`description`）**、会话来源（标题 · cwd）、排队提示、脱敏回调；
+     **问题正文 / 选项名 / 选项说明都完整发出、不截断，并保留换行**（用户 2026-09-15 追加要求
+     「方案具体内容要写清楚」—— 只发个「方案 A」等于让人闭眼选。长度上限默认 0 = 不截断，
+     要限长在调用处传 `questionMax` / `optionLabelMax` / `optionDescMax`）；
+   - 解析：`1/2/3` 选选项、回选项原文也算选中、其余文字当自定义答案；
+     多问题用 `|` 分隔逐题答（例如 `1|2`）；序号越界 / 空回复给明确提示而不是静默当自定义。
+2. `bridge.js` 的 `question/requested` 分支：没有 QQ 映射的会话按 `relayQuestionsToOwner`
+   （默认 `true`）转发到管理员私聊，并附上会话来源。
+3. **挂起请求由单槽改队列**：以前是 `pending: key -> entry`，被转发的多个会话共用
+   `private:<ownerQQ>` 这一个 key，新请求会把旧的顶掉**并给它回一个空答案**（等于替你跳过
+   了那个问题）。现在 `key -> entry[]`：按到达顺序排队，答完一条自动把下一条重推给你，
+   `/api/pending` 里带 `queueIndex`。超时仍按 `questionTimeoutMs`（默认 5 分钟）取消，不替你作答。
+4. 护栏 `scripts/test-question-relay.mjs`：纯函数 20 项 + `--live` 端到端 11 项。
+
+**实测证据**（`--live`：隔离实例 + 假 OneBot + **真 DSH**，让真 agent 调用询问工具，共 31/31 通过）：
+
+```
+[bridge] 提问已转发 (private:10001)：1 个问题 [来自其它 DSH 会话]      ← 会话 A 的提问
+[bridge] 提问已转发 (private:10001)：1 个问题 [来自其它 DSH 会话]      ← 会话 B 的提问（排进队列，提示「前面还有 1 个」）
+[bridge] 已回答提问 (private:10001): {"accepted":true}                 ← 灌一条「1」的私聊回复，回执被接受
+[bridge] 提问已转发 (private:10001)：1 个问题 [来自其它 DSH 会话]      ← 队列里的下一条被自动重推
+```
+
+同时断言了「该提问已在别处回答」的 `pending/cancelled` 帧确实到达（证明回执真的生效、
+DSH 侧继续跑），以及假 OneBot 收到的文案里带序号选项与来源。
+
+> 关键结论：提问/审批来自**全局 `$events` 流**，不依赖 `session/follow` ——
+> 所以它们跟 `notifyTaskDone`（任务完成通知）**没有耦合**。别把 `startSessionDiscovery()`
+> 挂到"因为要转发提问"上：关掉任务通知并不会废掉手机答题（反之亦然）。
+>
+> 端到端测试跑在**隔离实例**上（自己的 state / 端口 / 假 OneBot、假号 10001），
+> 真桥接在跑时会自动跳过（两个实例会抢答同一个提问）；要用 `--force` 才并行跑，
+> 此时真桥接跑的是旧代码、对非 QQ 会话的提问本来就是 `continue`，不会抢答。
+
+---
+
 ## 5.2 DSH 任务完成通知
 
 **需求**：Harness 的任务跑完后给管理员发一条 QQ 消息，人不在电脑前也知道活干完了。

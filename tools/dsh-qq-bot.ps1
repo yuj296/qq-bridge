@@ -12,9 +12,12 @@ $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
 # ── 配置 ────────────────────────────────────────────────────────────────────
-$SnowLumaDir   = 'C:\SnowLuma'
+# SnowLuma 安装目录：官方默认位置；装在别处就用环境变量 QQ_SNOWLUMA_DIR 指定。
+$SnowLumaDir   = if ($env:QQ_SNOWLUMA_DIR) { $env:QQ_SNOWLUMA_DIR } else { 'C:\SnowLuma' }
 $SnowLumaEntry = Join-Path $SnowLumaDir 'index.mjs'
-$BridgeDir     = 'D:\dk\qq-bridge'
+# 桥接目录：默认取本脚本所在目录的父目录（tools\.. = 仓库根），不再写死本机路径
+# （写死换目录就废，还会把本机路径带进公开仓库）。可用 QQ_BRIDGE_DIR 覆盖。
+$BridgeDir     = if ($env:QQ_BRIDGE_DIR) { $env:QQ_BRIDGE_DIR } else { Split-Path -Parent $PSScriptRoot }
 $BridgeEntry   = Join-Path $BridgeDir 'src\bridge.js'
 $BridgeConfig  = Join-Path $BridgeDir 'config.json'
 
@@ -28,11 +31,15 @@ $RestartStreakLimit = 3           # 连续重启这么多次仍不恢复就退�
 $GiveUpSleepSeconds = 600         # 退避时长
 $AfterStartSleep  = 30            # 刚拉起进程后的冷却时间
 $StartupWaitMs    = 60000         # 等端口就绪的最长时间
+# 桥接启动兜底窗口：这段时间内已经尝试启动过就不再重复拉起（避免 pid 文件/端口就绪前的双实例）
+$BridgeStartGuardSeconds = 90
 
 $StateDir = Join-Path $BridgeDir 'state\supervisor'
 $LogFile  = Join-Path $StateDir 'supervisor.log'
 $SnowLumaPidFile = Join-Path $StateDir 'snowluma.pid'
 $BridgePidFile   = Join-Path $StateDir 'bridge.pid'
+# 最近一次尝试启动桥接的时刻（配合 $BridgeStartGuardSeconds 做重复启动兜底）
+$BridgeStartFile = Join-Path $StateDir 'bridge.start-at'
 # 心跳文件：每次轮询都刷新。判断「守护进程还活着吗」看它就够了 ——
 # 计划任务里的 State=Running 不可靠（进程被控制台关闭事件杀掉时任务会回到 Ready）。
 $HeartbeatFile   = Join-Path $StateDir 'supervisor.heartbeat'
@@ -81,13 +88,24 @@ function Resolve-NodeExe {
 }
 
 # 读 PID 文件并返回仍活着的进程对象（PID 被复用时靠启动时间兜底不可靠，这里只做基本校验）
-function Get-ProcessFromPidFile([string]$PidFile) {
+function Get-ProcessFromPidFile([string]$PidFile, [string]$ExpectedExe) {
   if (-not (Test-Path $PidFile)) { return $null }
   $raw = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
   $procId = 0
   if (-not [int]::TryParse(("$raw").Trim(), [ref]$procId)) { return $null }
   $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
-  if ($p -and $p.ProcessName -match 'node') { return $p }
+  if (-not $p) { return $null }
+  # 为什么不用 -match 'node'：那是子串匹配，mynode.exe / node-proxy.exe 之类会被当成我们拉起的 node，
+  # 于是去 Stop-Process 一个不相干的进程（PID 复用后尤其危险）。这里用精确进程名比较。
+  if ($p.ProcessName -in @('node', 'nodejs')) {
+    # 传了期望的 node 路径就再比一次可执行文件全路径，确认这个 pid 现在真的是我们那份 node
+    if ($ExpectedExe) {
+      $exe = $null
+      try { $exe = $p.Path } catch {}
+      if ($exe -and ($exe -ne $ExpectedExe)) { return $null }
+    }
+    return $p
+  }
   return $null
 }
 
@@ -106,7 +124,8 @@ function Start-NodeScript([string]$NodeExe, [string]$Script, [string]$WorkDir, [
 }
 
 function Stop-Tracked([string]$PidFile, [string]$Label) {
-  $p = Get-ProcessFromPidFile $PidFile
+  # 传 $nodeExe：pid 被系统复用后，光看进程名可能命中另一个 node，必须比对可执行文件路径
+  $p = Get-ProcessFromPidFile $PidFile $nodeExe
   if (-not $p) { return }
   try {
     Stop-Process -Id $p.Id -Force -ErrorAction Stop
@@ -115,6 +134,8 @@ function Stop-Tracked([string]$PidFile, [string]$Label) {
     Write-Log "[$Label] 停止失败: $($_.Exception.Message)"
   }
   Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+  # 进程已确认停止，时间戳一并清掉，否则下一次启动会被兜底窗口挡住
+  if ($PidFile -eq $BridgePidFile) { Remove-Item $BridgeStartFile -Force -ErrorAction SilentlyContinue }
 }
 
 # 等端口就绪
@@ -242,8 +263,22 @@ while ($true) {
     # 只在 OneBot 接口真的能用时才拉桥接：桥接连不上 SnowLuma 会 fail-fast 直接退出，
     # 不然就会变成「起来→立刻死→再起来」的空转。
     if (-not $oneBotOk) { Start-Sleep -Seconds $PollSeconds; continue }
-    $brProc = Get-ProcessFromPidFile $BridgePidFile
+    $brProc = Get-ProcessFromPidFile $BridgePidFile $nodeExe
+    # 为什么加这层兜底：桥接启动到写出 pid 文件 / 控制台端口真正开始监听之间有几十秒窗口，
+    # 这段窗口里 pid 文件和端口都还看不到，下一轮轮询（20s 后）就会再拉一次 → 两个桥接实例打架
+    # （第二个会因 state\bridge.lock 直接退出）。这里记住「最近一次尝试启动的时刻」，窗口内不再重复拉起。
     if (-not $brProc -and -not (Test-Port $BridgePort)) {
+      $bridgeStartAt = [datetime]::MinValue
+      if (Test-Path $BridgeStartFile) {
+        try { $bridgeStartAt = [datetime]::Parse((Get-Content $BridgeStartFile -ErrorAction Stop | Select-Object -First 1).Trim()) } catch { $bridgeStartAt = [datetime]::MinValue }
+      }
+      $sinceStart = ((Get-Date) - $bridgeStartAt).TotalSeconds
+      if ($sinceStart -lt $BridgeStartGuardSeconds) {
+        Write-Log "[bridge] $([int]$sinceStart)s 前刚尝试启动过（pid 文件/端口尚未就绪），本轮不重复拉起（兜底窗口 $BridgeStartGuardSeconds s）"
+        Start-Sleep -Seconds $PollSeconds
+        continue
+      }
+      Set-Content -Path $BridgeStartFile -Value (Get-Date -Format 'o') -Encoding ASCII
       Start-NodeScript $nodeExe $BridgeEntry $BridgeDir $BridgePidFile 'bridge' | Out-Null
       if (Wait-Port $BridgePort $StartupWaitMs) { Write-Log '[bridge] 控制台端口就绪' }
       else { Write-Log '[bridge] 等了 60s 控制台端口仍未就绪' }

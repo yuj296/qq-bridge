@@ -6,29 +6,31 @@
 //   1. 注册到哪个槽位、什么顺序 —— 必须是 settings.section / order=1（排在「通用设置」下面）
 //   2. 拿真 schema 渲染出来的页面长什么样 —— 分组标题、分组说明、字段说明、行数对不对
 //
-// React / react-dom 从 DSH Desktop 自带的那份拿；拿不到就跳过。
+// React / react-dom 从 DSH Desktop 自带的那份拿；拿不到就**跳过**（exit 2，不算通过）。
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { resolveDshApp, exitSkipped } from './dsh-app-path.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, '..');
 const BUNDLE = path.join(REPO, 'plugins', 'qq-mode-console', 'lib', 'client.js');
-const DSH_APP = 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\DSH Desktop\\resources\\app';
+// DSH 自带的 react / react-dom 在哪：不写死用户名 —— 见 scripts/dsh-app-path.mjs
+const DSH_APP = resolveDshApp();
 
-const req = createRequire(path.join(DSH_APP, 'package.json'));
 let React;
 let ReactDOMServer;
 let z;
 try {
+  if (DSH_APP === '') throw new Error('没找到 DSH Desktop 应用目录');
+  const req = createRequire(path.join(DSH_APP, 'package.json'));
   React = req('react');
   ReactDOMServer = req('react-dom/server');
   z = req('@deepseek-ai/schemastery');
 } catch (error) {
-  console.log(`⚠️ 找不到 react/react-dom/schemastery（${error?.message ?? error}），跳过`);
-  process.exit(0);
+  exitSkipped(`找不到 react/react-dom/schemastery（${error?.message ?? error}）`);
 }
 
 const { buildSchema, FIELDS, GROUPS, groupOf } = await import('../plugins/qq-mode-console/lib/schema.js');

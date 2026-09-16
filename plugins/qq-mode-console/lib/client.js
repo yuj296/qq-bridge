@@ -8,7 +8,10 @@
 //
 // 为什么必须自带客户端代码：DSH 的设置页不会自动渲染 settings 命名空间，
 // 每个分区都得由插件自己注册（官方只为它自己的几个命名空间写了界面）。
-window.__ModuleLoader__.load({
+// 整个 load 都包在 try/catch 里：外壳（__ModuleLoader__）还没就绪时 load 自己就会抛，
+// 抛出去会让整个 Web 外壳起不来（本项目踩过这个坑）。
+try {
+  window.__ModuleLoader__.load({
   id: "qq-mode-console",
   factory: (require) => {
     var module = { exports: {} };
@@ -22,6 +25,7 @@ window.__ModuleLoader__.load({
     /** 分组中文名与说明：优先用 schema 里带的 description，这里只是兜底。 */
     const GROUP_FALLBACK = {
       core: { title: "基本", desc: "身份、准入、会话、控制台。这里的项改错后果最直接。" },
+      persona: { title: "性格与人设", desc: "管它是什么性格、用什么语气、怎么说话。填了就注入，全留空 = 一个字都不改（保持现状）。" },
       notify: { title: "通知", desc: "什么情况下手机会收到消息 —— 嫌吵就调这几个阈值。" },
       allow: { title: "白名单（谁能跟它说话）", desc: "空白名单 + 放行开关关闭 = 谁都不理。黑名单优先于白名单。" },
       deny: { title: "黑名单", desc: "命中黑名单的会话一律不处理，优先级高于白名单。" },
@@ -39,9 +43,10 @@ window.__ModuleLoader__.load({
       notifyTaskDoneDebounceMs: "notify",
       notifyTaskDoneMaxChars: "notify",
       relayApprovalsToOwner: "notify",
+      relayQuestionsToOwner: "notify",
       sessionDiscoveryMs: "notify"
     };
-    const GROUP_ORDER = ["core", "notify", "allow", "deny", "slang", "social", "socialV2", "dsh", "snowluma", "security"];
+    const GROUP_ORDER = ["core", "persona", "notify", "allow", "deny", "slang", "social", "socialV2", "dsh", "snowluma", "security"];
     /** socialV2 下的二级分组标题。 */
     const SUBGROUP_TITLES = {
       tools: "工具开关（AI 能用哪些能力）",
@@ -88,6 +93,7 @@ window.__ModuleLoader__.load({
       ".qqp_badge[data-kind=user]{color:var(--dsw-alias-label-warning,#d48806)}",
       ".qqp_badge[data-kind=draft]{color:var(--dsw-alias-label-info,#1668dc);cursor:default}",
       ".qqp_err{color:var(--dsw-alias-label-error,#d4380d);font-size:12px}",
+      ".qqp_warn{margin:0 0 12px;padding:8px 10px;font-size:12px;line-height:1.7;border:1px solid var(--dsw-alias-label-warning,#d48806);border-radius:8px;color:var(--dsw-alias-label-warning,#d48806)}",
       ".qqp_ok{color:var(--dsw-alias-label-success,#389e0d);font-size:12px}",
       ".qqp_empty{padding:24px 0;color:var(--dsw-alias-label-secondary,#8a8f9c);font-size:12px}"
     ].join("");
@@ -199,16 +205,36 @@ window.__ModuleLoader__.load({
       switch (field.kind) {
         case "bool": return Boolean(raw);
         case "number": {
-          const n = Number(String(raw).trim());
+          const raw2 = String(raw).trim();
+          // 清空 = 这一项不设（别偷偷写成 0：ownerQQ 变 0 会让管理员判定直接失效）。
+          // 想真设 0 就老老实实敲一个 0。
+          if (raw2 === "") return undefined;
+          const n = Number(raw2);
           return Number.isFinite(n) ? n : undefined;
         }
         case "numbers": {
-          const parts = String(raw).split(/[,，\s]+/).map((s) => Number(s.trim())).filter((n) => Number.isFinite(n));
-          return parts;
+          const src = String(raw).trim();
+          // 清空 = 这一项不设（与 number / enum 同语义）。
+          // 以前把空串解析成 []，于是"清空输入框 + 保存"会把白名单实际写成"空名单"
+          // （allow.private 空 + allowAllWhenEmpty:false = 谁都不放行），而界面上看起来只是没填。
+          if (src === "") return undefined;
+          const parts = src.split(/[,，\s]+/).map((s) => Number(s.trim())).filter((n) => Number.isFinite(n));
+          // 非空但一个合法项都没有（比如 numbers 字段里敲了汉字）同样视为"没改"，
+          // 不要用 [] 覆盖掉原有名单。
+          return parts.length === 0 ? undefined : parts;
         }
         case "strings": {
-          const parts = String(raw).split(/[,，\n]+/).map((s) => s.trim()).filter((s) => s !== "");
-          return parts;
+          const src = String(raw).trim();
+          // 同上：清空 = 不设置，不用 [] 覆盖。
+          if (src === "") return undefined;
+          const parts = src.split(/[,，\n]+/).map((s) => s.trim()).filter((s) => s !== "");
+          return parts.length === 0 ? undefined : parts;
+        }
+        case "enum": {
+          // 下拉框的第一项是「（不设置，沿用原值）」→ 空值 = 这一项不设。
+          // 不能把它当空串提交：enum 的 schema 只接受那几个常量，空串会被校验拒绝。
+          const text = String(raw);
+          return text === "" ? undefined : text;
         }
         default: return String(raw);
       }
@@ -217,15 +243,20 @@ window.__ModuleLoader__.load({
     // ── 组件 ──────────────────────────────────────────────────────────────
 
     function FieldRow(props) {
-      const { field, value, overridden, pending, first, onChange, onReset } = props;
-      const text = pending !== undefined ? pending : formatValue(field, value);
+      const { field, value, baseValue, overridden, pending, state, first, onChange, onReset } = props;
+      // 显示哪个值：改过 → 草稿值；刚点「已改」撤销 → 磁盘值（它马上要回到磁盘值）；
+      // 没动过 → 当前生效值（磁盘 + 设置页覆盖的合并结果）。
+      // pending 是草稿里的**值**，不是整条记录 —— 早先错把整条记录当值给控件，
+      // 症状就是输入框显示 [object Object]、勾选框永远弹回。
+      const shown = state === "set" ? pending : (state === "unset" ? baseValue : value);
+      const text = formatValue(field, shown);
       const common = { "aria-label": field.label };
       let control;
       if (field.kind === "bool") {
         control = React.createElement("input", {
           ...common,
           type: "checkbox",
-          checked: pending !== undefined ? pending === true : value === true,
+          checked: shown === true,
           onChange: (event) => onChange(event.target.checked)
         });
       } else if (field.kind === "enum") {
@@ -268,7 +299,7 @@ window.__ModuleLoader__.load({
               title: "这一项在设置页里被改过；点一下 = 恢复成 config.json 的值",
               onClick: onReset
             }, "已改") : null,
-            pending !== undefined ? React.createElement("span", { className: "qqp_badge", "data-kind": "draft" }, "待保存") : null
+            state !== "none" ? React.createElement("span", { className: "qqp_badge", "data-kind": "draft" }, "待保存") : null
           )
         ),
         field.desc ? React.createElement("p", { className: "qqp_desc" }, field.desc) : null
@@ -276,7 +307,7 @@ window.__ModuleLoader__.load({
     }
 
     function GroupSection(props) {
-      const { groupKey, title, desc, fields, values, user, draft, onField, onReset, defaultOpen } = props;
+      const { groupKey, title, desc, fields, values, base, user, draft, onField, onReset, defaultOpen } = props;
       const [open, setOpen] = React.useState(Boolean(defaultOpen));
       const dirty = fields.filter((f) => draft[keyOf(f.path)] !== undefined).length;
       const rows = [];
@@ -287,16 +318,23 @@ window.__ModuleLoader__.load({
         if (!subs.has(field.sub)) subs.set(field.sub, []);
         subs.get(field.sub).push(field);
       }
-      const renderOne = (field, first) => React.createElement(FieldRow, {
-        key: keyOf(field.path),
-        field,
-        first,
-        value: readAt(values, field.path),
-        overridden: readAt(user, field.path) !== undefined,
-        pending: draft[keyOf(field.path)],
-        onChange: (raw) => onField(field, raw),
-        onReset: () => onReset(field)
-      });
+      const renderOne = (field, first) => {
+        const entry = draft[keyOf(field.path)];
+        // 三态：没动过 / 改过（带值）/ 刚撤销（要显示磁盘上的值）。
+        const state = entry === undefined ? "none" : (entry.kind === "unset" ? "unset" : "set");
+        return React.createElement(FieldRow, {
+          key: keyOf(field.path),
+          field,
+          first,
+          value: readAt(values, field.path),
+          baseValue: readAt(base, field.path),
+          overridden: readAt(user, field.path) !== undefined,
+          pending: entry?.value,
+          state,
+          onChange: (raw) => onField(field, raw),
+          onReset: () => onReset(field)
+        });
+      };
       plain.forEach((field, index) => rows.push(renderOne(field, index === 0 && subs.size === 0)));
       for (const [sub, list] of subs) {
         rows.push(React.createElement(
@@ -368,14 +406,33 @@ window.__ModuleLoader__.load({
         setDraft((previous) => {
           const next = { ...previous };
           const key = keyOf(field.path);
-          if (parsed === undefined) delete next[key];
-          else next[key] = { path: field.path, value: parsed, kind: "set" };
+          if (parsed === undefined) {
+            // 清空 = 想恢复默认：这一项本来在设置页里被改过就记成「撤销」（保存时 unset），
+            // 本来没改过就当没动过 —— 别制造一条没有意义的覆盖。
+            if (readAt(snapshot.user, field.path) !== undefined) next[key] = { path: field.path, kind: "unset" };
+            else delete next[key];
+          } else {
+            next[key] = { path: field.path, value: parsed, kind: "set" };
+          }
           return next;
         });
       };
       const onReset = (field) => {
         setOk("");
         setDraft((previous) => ({ ...previous, [keyOf(field.path)]: { path: field.path, kind: "unset" } }));
+      };
+      /** 宽松等值比较：数字/字符串/布尔/数组各按自己的语义比，避免宿主规范化后误判。 */
+      const sameValue = (a, b) => {
+        if (Array.isArray(a) || Array.isArray(b)) return JSON.stringify(a ?? []) === JSON.stringify(b ?? []);
+        if (typeof a === "number" || typeof b === "number") return Number(a) === Number(b);
+        if (typeof a === "boolean" || typeof b === "boolean") return a === b;
+        return String(a ?? "").trim() === String(b ?? "").trim();
+      };
+      /** 这一条 op 是否真的落进 user 层了。 */
+      const opApplied = (user, op) => {
+        const current = readAt(user, op.path);
+        if (op.op === "unset") return current === undefined;
+        return current !== undefined && sameValue(current, op.value);
       };
       const save = async () => {
         if (saving || dirtyCount === 0) return;
@@ -386,11 +443,30 @@ window.__ModuleLoader__.load({
           const ops = Object.values(draft).map((entry) => entry.kind === "unset"
             ? { op: "unset", path: entry.path }
             : { op: "set", path: entry.path, value: entry.value });
-          await settings.mutate(ops, snapshot.revision);
+          // 用**当前**revision 而不是本组件渲染时那份：连续保存两次时，旧 revision 会被宿主拒掉。
+          const live = settings.getSnapshot();
+          await settings.mutate(ops, live.revision);
           const settled = settings.getSnapshot();
+          if (settled.status !== "ready") {
+            setError("写入后状态异常，请重新加载页面确认。改动还留在页面上。");
+            return;
+          }
+          // ⚠️ 宿主拒绝写入时，settingsScope.mutate() **既不抛异常、也不返回失败**
+          //（DSH 的 SettingsController.mutate 内部只是 recover() 后静默 return）。
+          // 只判 status 会把"被拒绝"显示成绿色「已保存」——那正是"改了不生效"的一种成因。
+          // 所以这里回读 user 层逐条比对（2026-09-16 审计修复）。
+          const settledUser = settled.user;
+          const notApplied = settledUser === undefined || settledUser === null
+            ? []                                        // user 层读不到就不下结论，保持旧行为
+            : ops.filter((op) => !opApplied(settledUser, op));
+          if (notApplied.length > 0) {
+            const preview = notApplied.slice(0, 3).map((op) => op.path.join(".")).join(", ");
+            setError(`保存被拒绝了：${notApplied.length} 项没写进去（${preview}${notApplied.length > 3 ? " 等" : ""}）。`
+              + "常见原因：值不合法（schema 校验没过）、或页面数据已过期。改动仍留在页面上，改好后重新保存。");
+            return;                                     // 保留草稿，别让用户以为已经保存成功
+          }
           setDraft({});
-          if (settled.status !== "ready") setError("写入后状态异常，请重新加载页面确认。");
-          else setOk(`已保存 ${ops.length} 项；桥接会在 5 秒内自动生效（标 ⚠️ 的项要重启桥接）。`);
+          setOk(`已保存 ${ops.length} 项；桥接会在 5 秒内自动生效（标 ⚠️ 的项要重启桥接）。`);
         } catch (failed) {
           setError(`保存失败：${failed?.message ?? failed}`);
         } finally {
@@ -452,10 +528,20 @@ window.__ModuleLoader__.load({
 
       const values = snapshot.value;
       const user = snapshot.user ?? {};
+      // base 为空 = host 半侧没读到 config.json（文件不存在或读盘失败）。
+      // 这时每一项都会显示为空，用户照着重填一遍就会变成整页 user 覆盖 —— 必须在顶部说清楚。
+      const baseEmpty = Object.keys(snapshot.base ?? {}).length === 0
+        && Object.keys(values ?? {}).length === 0;
       return React.createElement(
         "div",
         { className: "qqp" },
         header,
+        baseEmpty
+          ? React.createElement("p", { className: "qqp_warn" },
+            "⚠️ host 半侧没读到 config.json（文件不存在或读不出来），下面每一项都会显示为空 —— "
+            + "先修好配置文件再看这一页，别照着重填一遍（重填会变成整页覆盖）。"
+            + "原因可以看 state/qq-mode-plugin.log。")
+          : null,
         order.map((key) => {
           const heading = groupHeading(schema, key);
           return React.createElement(GroupSection, {
@@ -465,6 +551,7 @@ window.__ModuleLoader__.load({
             desc: heading.desc,
             fields: groups.get(key),
             values,
+            base: snapshot.base ?? {},
             user,
             draft,
             onField,
@@ -515,4 +602,7 @@ window.__ModuleLoader__.load({
     exports.inject = inject;
     return module.exports;
   }
-});
+  });
+} catch (error) {
+  console.warn("[qq-mode-console] 客户端半侧加载失败:", error);
+}

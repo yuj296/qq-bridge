@@ -55,9 +55,10 @@ QQ 私聊消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 �
 | --- | --- | --- |
 | **DSH 0.1.2 协议移植** | 上游依赖 `@deepseek-ai/dsh-host-apiproxy`（该包在 DSH 0.1.2-alpha.1 被官方删除），**原版在新 DSH 上完全连不上**；本 fork 重写了客户端：`?token=` 换 cookie 鉴权、令牌/端口自动发现、`$events` waterfall 回执、`session/follow` 多路复用作事件流 | `src/dsh-client.js`、`PORTING-DSH-0.1.2.md` |
 | **只保留私聊** | 删掉全部群聊能力：群消息入口、群发送路由（`/api/send/group`）、6 个群 MCP 工具、16 个群相关配置字段、群语境话术；群消息一律忽略。私聊引用回复改走 `/api/send/reply` + `body.userId` | `src/bridge.js`、`src/mcp-snowluma-safe.js`、`plugins/qq-mode-console/lib/schema.js` |
-| **设置页「QQ 机器人」分区** | DSH 设置左边导航里「通用设置」正下方新增一个分区，把 **140 项配置**按 10 组摊开（基本 / 通知 / 白名单 / 黑名单 / 安全 / 黑话学习 / 一代仿真 / 二代仿真 / 模型与 DSH 接线 / SnowLuma 接线），每项带一段中文说明；保存后桥接 **5 秒内生效**。优先级：**设置页改过的字段 > `config.json`（磁盘）= 桥接控制台改的值 > 代码默认值**，没动过的字段一个字都不碰；点重置即回磁盘值 | `plugins/qq-mode-console/` |
+| **设置页「QQ 机器人」分区** | DSH 设置左边导航里「通用设置」正下方新增一个分区，把 **148 项配置**按 11 组摊开（基本 / 性格与人设 / 通知 / 白名单 / 黑名单 / 安全 / 黑话学习 / 一代仿真 / 二代仿真 / 模型与 DSH 接线 / SnowLuma 接线），每项带一段中文说明；保存后桥接 **5 秒内生效**。优先级：**设置页改过的字段 > `config.json`（磁盘）= 桥接控制台改的值 > 代码默认值**，没动过的字段一个字都不碰；点重置即回磁盘值 | `plugins/qq-mode-console/` |
+| **性格也能在设置页调** | 「性格与人设」组 7 格：总开关 / 名字·自称 / 性格 / 说话语气 / 说话方式 / 口头禅与习惯 / 禁忌。填了才注入（六格全空 = 一个字都不改，与升级前完全一致），与角色卡 `roles/*.md` 叠加、越靠后越优先；改完 5 秒生效，不用碰 preset 文件 | `plugins/qq-mode-console/lib/schema.js`、`src/bridge.js`（`personaBlock()`） |
 | **侧边栏「唤醒」按键** | 「技能中心」正下方一行，点一下＝拉起 SnowLuma + 桥接，并给管理员 QQ 发一句「睡醒了」；失败时按钮 tooltip 会显示卡在哪一步。路由只收**本机同源**请求（信任围栏按 IP 字面量严格解析，控制台令牌不下发到页面） | `plugins/qq-wake/` |
-| **审批与任务完成通知上手机** | agent 索要权限时把审批转发到管理员 QQ，回「通过 / 拒绝」即决策；跑够时长（默认 **5 分钟**）的回合结束后推一条完成通知，阈值与开关都能在设置页调 | `src/bridge.js`、`relayApprovalsToOwner` / `notifyTaskDone*` |
+| **审批、提问与任务完成通知上手机** | agent 索要权限时把审批转发到管理员 QQ，回「通过 / 拒绝」即决策；**你在 DSH 界面里自己开的会话里 agent 问你的选项**也会转到手机，回「1/2/3」或直接回答案即可（`relayQuestionsToOwner`，默认开）；跑够时长（默认 **5 分钟**）的回合结束后推一条完成通知，阈值与开关都能在设置页调 | `src/bridge.js`、`src/question-flow.js`、`relayApprovalsToOwner` / `relayQuestionsToOwner` / `notifyTaskDone*` |
 | **可选自启守护（默认不装）** | `tools/` 下是一套「计划任务 + 5 分钟看门狗 + 心跳文件」的守护方案，`tools/install-task.ps1` 一键装。**默认不注册任何计划任务**：机器人平时不动，只在点「唤醒」时起来 | `tools/README.md` |
 | **给 AI 代理的项目说明** | 文件地图、数据流不变量、15 条已知坑、改动约束、验证清单 —— 一个没有上下文的代理读完就能上手 | [`AGENTS.md`](AGENTS.md)（权威性最高） |
 | **测试与自检** | 插件入口冒烟、设置字段覆盖/分组漂移、设置覆盖规则单测、唤醒流程与信任围栏、客户端半侧（jsdom）、**「群聊已移除」回归**等 | `scripts/test-*.mjs`（见下文「自测」） |
@@ -86,7 +87,7 @@ QQ 私聊消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 �
   - `reserved`（一代仿真）：私聊仿真，观望/活跃/试探/退场状态机，选择性参与、按空格分句发送、主动收尾
   - `reserved2`（二代仿真，运行 `setup-dsh.mjs` 后 DSH 默认）：文本不自动转发，AI 通过 `qq_get_unread_messages` / `qq_send_message` 等工具自主看消息、发言、等待、设置唤醒/潜水；DSH 端使用 `qq-chat-v2` preset
 - **交互增强**：
-  - agent 通过 `ask_user_question` 提问时，问题会转发到 QQ，回复即自动应答
+  - agent 通过 `ask_user_question` 提问时，问题会转发到 QQ，回复即自动应答：回 `1/2/3` 选中对应选项、回选项原文也算选中、回别的文字就是自定义答案（多个问题用 `|` 分隔逐题答）。**问题正文与每个选项的详细说明都完整发出、不截断**（换行也保留），手机上能看清方案到底是什么，不是只给个「方案 A」。**你在 DSH 界面里自己开的会话**（编码任务等）里的提问同样会转到手机（`relayQuestionsToOwner`，默认开），多条同时挂着时按顺序一条条答
   - agent 请求工具审批时，转发到 QQ，回复「通过」/「拒绝」即可决策
   - 支持 DSH 斜杠命令（如 `/model`）与 `/reset`（重置会话上下文）
   - 私聊引用/回复会解析成「被引用人 + 原文」注入 DSH（如 `[引用 Derp：El Psy Kongroo是啥]机关的走狗`），让 AI 知道这句话在回哪条；引用机器人自己时会被视为必回
@@ -109,7 +110,7 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 复制 `config.example.json` 为 `config.json` 后编辑：
 
 > 💡 **更省事的方式**：装好插件后直接在 **DSH「设置 → QQ 机器人」**里改 ——
-> 140 项全在 UI 上、每项带中文说明，保存后桥接 5 秒内生效，不用手写 JSON。
+> 148 项全在 UI 上、每项带中文说明，保存后桥接 5 秒内生效，不用手写 JSON。
 > `config.json` 仍然有效（适合脚本化部署），两者的优先级见上文表格。
 
 > Windows CMD 用户请用：`copy config.example.json config.json`

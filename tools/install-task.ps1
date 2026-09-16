@@ -1,6 +1,6 @@
 ﻿# install-task.ps1 —— 把 qq-bridge 守护脚本注册成「登录时自动启动」的计划任务
 #
-# 用法（在 D:\dk\qq-bridge 目录下）：
+# 用法（在本仓库根目录下）：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\install-task.ps1
 #
 # 卸载：

@@ -3,16 +3,18 @@
 //
 //   node scripts/test-wake-client.mjs
 //
-// jsdom 不是本仓库依赖，脚本会去 DSH Desktop 自带的那份拿；拿不到就跳过（exit 0）。
+// jsdom 不是本仓库依赖，脚本会去 DSH Desktop 自带的那份拿；拿不到就**跳过**（exit 2，不算通过）。
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { resolveDshApp, exitSkipped } from './dsh-app-path.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BUNDLE = path.join(__dirname, '..', 'plugins', 'qq-wake', 'lib', 'client.js');
-const DSH_APP = 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\DSH Desktop\\resources\\app';
+// DSH 自带的 jsdom 在哪：不写死用户名 —— 见 scripts/dsh-app-path.mjs
+const DSH_APP = resolveDshApp();
 
 const require_ = createRequire(import.meta.url);
 let JSDOM;
@@ -20,10 +22,10 @@ try {
   ({ JSDOM } = require_('jsdom'));
 } catch {
   try {
+    if (DSH_APP === '') throw new Error('没找到 DSH Desktop 应用目录');
     ({ JSDOM } = createRequire(path.join(DSH_APP, 'package.json'))('jsdom'));
   } catch (error) {
-    console.log(`⚠️ 找不到 jsdom（${error?.message ?? error}），跳过客户端自测`);
-    process.exit(0);
+    exitSkipped(`找不到 jsdom（${error?.message ?? error}）`);
   }
 }
 
